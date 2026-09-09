@@ -670,7 +670,7 @@ PAGE = r"""<!doctype html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Diff Review</title>
+<title>diff &amp; tonic</title>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/github-dark.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <style>
@@ -978,7 +978,7 @@ function renderTop(){
                       : replies ? '<span class="abadge">' + replies + '</span>' : '';
   $('#me').innerHTML = humanAvatar((META.user||{}).seed || 'you', 20);
   $('#me').title = 'you';
-  document.title = '(' + done + '/' + n + ') Diff Review';
+  document.title = '(' + done + '/' + n + ') diff & tonic';
 }
 
 /* ----------------------------------------------------------------- sidebar */
