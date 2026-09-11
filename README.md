@@ -56,16 +56,33 @@ and uncommitted changes together.
 - You land on **Overview**: files changed, additions/deletions, commits, progress,
   churn per file and per file type. Click any row to open that file.
 - **Sidebar**: every changed file with status, `+`/`−` counts, a **reviewed** checkbox
-  and thread badges. Tick files off as you go; the top bar tracks `X / Y reviewed`.
+  and thread badges. Search by filename or folder with **Find a file**. Tick files
+  off as you go; the top bar tracks `X / Y reviewed`.
+- **Start reviewing / Continue review** jumps to the next unreviewed file. The
+  charcoal-and-slate interface adapts to smaller windows and respects reduced motion.
 - **Click a line number** (or double-click a line) to comment on it. Add file-level
   thoughts in the **File notes** box — both save as you type.
 - **Resolve** a thread when you're done with it. It stays visible, dimmed with a
   `✓ resolved` chip, and stops counting as open.
 
 ```
-   o  overview          [  ]  prev / next file        r  toggle reviewed
-   u  next unreviewed    ⌘/Ctrl+Enter  save comment   Esc  cancel
+   h / l  prev / next file      j / k  scroll down / up
+   i  add comment              o  approve / undo approval
+   u  next unreviewed          p  overview
+   Shift+j / Shift+k  page down / up
+   ⌘/Ctrl+Enter  save comment   Esc  cancel
 ```
+
+The shortcut bar stays visible at the bottom, even while scrolling a long diff.
+The main shortcuts sit together under your right hand: **H J K L** and **U I O P**.
+**O** approves the current file (marks it reviewed); press it again to undo approval.
+**I** opens a comment on the code line you selected with a click, or the first visible
+line if none is selected in view. Files without code lines use File notes instead.
+Shortcuts stay inactive while typing in a text field. The bar's actions are clickable too.
+**J/K** scroll the review panel without needing to click it first. Hold either key to
+keep scrolling, or add **Shift** to move a page at a time. **[ / ]** still switch files;
+**R/C** remain aliases for approve/comment. Arrow keys, Page Up/Down, and Home/End
+also work, and text fields retain normal typing and cursor keys.
 
 Everything is stored in `<repo>/.review/state.json`, written immediately on every
 change. Restart the server or reload the page and your progress is there. `.review/`
@@ -116,7 +133,7 @@ avatars are generated locally, no avatar service and no requests:
 | `author` | shows as | avatar |
 |---|---|---|
 | `you` (or absent) | **You** — your git identity is never displayed | identicon, seeded from `user.name`/`user.email` |
-| `agent` | **Agent** + `agent` tag | gradient sparkle, purple bubble |
+| `agent` | **Agent** + `agent` tag | gradient sparkle, slate-blue bubble |
 | anything else, e.g. `ai-review-agent` | prettified id (**AI Review Agent**) + `ai` tag | teal magnifier, hue seeded from the id, teal bubble |
 
 So a separate automated reviewer writing as `ai-review-agent` is visually distinct
