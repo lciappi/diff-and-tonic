@@ -675,11 +675,12 @@ PAGE = r"""<!doctype html>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 <style>
   :root{
-    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2333; --line:#30363d;
-    --fg:#e6edf3; --dim:#8b949e; --accent:#58a6ff;
-    --add:#0f2f1c; --addln:#3fb950; --del:#3a1418; --delln:#f85149;
-    /* chart marks: re-stepped green so the pair clears CVD separation */
-    --c-add:#2ea043; --c-del:#f85149;
+    color-scheme:dark;
+    --bg:#181a1d; --bg2:#202327; --bg3:#2b2f34; --line:#3c4148;
+    --fg:#edf0f3; --dim:#a5adb7; --accent:#a9bfd8;
+    --add:#202e44; --addln:#91bcf4; --del:#392324; --delln:#f09d95;
+    /* Blue additions and coral deletions remain distinct without relying on hue alone. */
+    --c-add:#82aee8; --c-del:#dc9186;
     --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
   }
   *{box-sizing:border-box}
@@ -739,15 +740,15 @@ PAGE = r"""<!doctype html>
   .msg{display:flex;gap:8px;align-items:flex-start;margin:4px 0}
   .msg.reply{margin-left:26px}
   .av{flex:0 0 auto;border-radius:7px;box-shadow:0 0 0 1px rgba(255,255,255,.12),0 1px 4px rgba(0,0,0,.45)}
-  .av.agent{box-shadow:0 0 0 1px rgba(219,97,162,.55),0 0 10px rgba(137,87,229,.45)}
+  .av.agent{box-shadow:0 0 0 1px rgba(145,172,198,.55),0 0 10px rgba(107,142,175,.3)}
   .av.bot{box-shadow:0 0 0 1px rgba(57,197,187,.5),0 0 10px rgba(31,150,180,.4)}
   .bub{flex:1;min-width:0;background:var(--bg3);border:1px solid var(--line);border-radius:8px;padding:6px 9px;font:12px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
   .msg.reply .bub{background:#191f2e;border-color:#2b3450}
-  .msg.agent .bub{background:linear-gradient(180deg,#231b31,#1b1926);border-color:#3d2a4d}
+  .msg.agent .bub{background:linear-gradient(180deg,#26313e,#202730);border-color:#435366}
   .msg.bot .bub{background:linear-gradient(180deg,#12262b,#101d22);border-color:#26454e}
   .who{display:flex;align-items:center;gap:7px;margin-bottom:2px;color:var(--dim);font-size:11px}
   .who b{color:var(--fg);font-weight:600}
-  .who .tag{background:#2b1f3d;color:#c297f5;border-radius:99px;padding:0 6px;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
+  .who .tag{background:#2b3644;color:#adc5df;border-radius:99px;padding:0 6px;font-size:10px;text-transform:uppercase;letter-spacing:.05em}
   .who .tag.bot{background:#102c33;color:#39c5bb}
   .who .tools{margin-left:auto;display:flex;gap:4px;opacity:0;transition:opacity .12s}
   .msg:hover .who .tools{opacity:1}
@@ -760,16 +761,16 @@ PAGE = r"""<!doctype html>
   .thr.done:hover{opacity:.8}
   .thr.done .bub{cursor:pointer}
   .thr.done .txt.clamp{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-  .ok{display:inline-flex;align-items:center;gap:4px;background:#0f2f1c;color:var(--addln);border-radius:99px;padding:0 7px;font-size:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
+  .ok{display:inline-flex;align-items:center;gap:4px;background:#202e44;color:var(--addln);border-radius:99px;padding:0 7px;font-size:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
   .more{color:var(--dim);font-size:11px;margin-left:6px}
   tr.has.settled td.ln::after{color:var(--addln);content:"\2713"}
-  .cbadge.settled{background:#0f2f1c;color:var(--addln)}
+  .cbadge.settled{background:#202e44;color:var(--addln)}
   .orph{margin:0;padding:10px 14px 12px;border-bottom:1px solid var(--line);background:#1a1712}
   .orph .oh{display:flex;align-items:center;gap:8px;font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:#e3b341;margin-bottom:4px}
   .moved{background:#3d2f04;color:#e3b341;border-radius:99px;padding:0 6px;font-size:10px;text-transform:uppercase;letter-spacing:.05em;font-weight:600}
   .f.stale .nm{color:var(--dim)}
-  .await{display:inline-flex;align-items:center;gap:5px;color:#c297f5;font-size:11px}
-  .await::before{content:"";width:6px;height:6px;border-radius:99px;background:#c297f5;animation:pulse 1.4s infinite}
+  .await{display:inline-flex;align-items:center;gap:5px;color:#adc5df;font-size:11px}
+  .await::before{content:"";width:6px;height:6px;border-radius:99px;background:#adc5df;animation:pulse 1.4s infinite}
   @keyframes pulse{0%,100%{opacity:.25;transform:scale(.8)}50%{opacity:1;transform:scale(1.15)}}
   .cmt-ed{margin:4px 0 4px 30px}
   .cmt-ed .btns{display:flex;gap:6px;margin-top:5px;align-items:center}
@@ -777,10 +778,10 @@ PAGE = r"""<!doctype html>
   .me{display:flex;align-items:center;gap:6px;white-space:nowrap;font-size:12px}
   .me .nm{color:var(--dim);max-width:130px;overflow:hidden;text-overflow:ellipsis}
   .opt{display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;font-size:12px;color:var(--dim)}
-  .opt input{accent-color:#8957e5;cursor:pointer}
-  .opt.on{color:#c297f5}
-  .abadge{background:#2b1f3d;color:#c297f5;border-radius:99px;padding:0 6px;font-weight:600}
-  .dot{width:7px;height:7px;border-radius:99px;background:#c297f5;display:inline-block;animation:pulse 1.4s infinite}
+  .opt input{accent-color:#6b8eaf;cursor:pointer}
+  .opt.on{color:#adc5df}
+  .abadge{background:#2b3644;color:#adc5df;border-radius:99px;padding:0 6px;font-weight:600}
+  .dot{width:7px;height:7px;border-radius:99px;background:#adc5df;display:inline-block;animation:pulse 1.4s infinite}
   /* ---- overview ---- */
   .ovw{padding:14px 16px 30px}
   .tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:10px}
@@ -813,27 +814,129 @@ PAGE = r"""<!doctype html>
   #rng{cursor:pointer}
   .hint{padding:8px 14px;color:#6e7681;font-size:11px;border-top:1px solid var(--line)}
   kbd{font-family:var(--mono);background:var(--bg3);border:1px solid var(--line);border-radius:4px;padding:0 4px}
+  /* A little tonic: quiet surfaces, slate accents, room to breathe. */
+  body{font-size:13px}
+  button{padding:7px 12px;border-radius:8px;transition:background .15s,border-color .15s,transform .15s}
+  button:hover{background:#343a41;border-color:#758291}
+  button:active{transform:translateY(1px)}
+  button:disabled{opacity:.5;cursor:default}
+  :focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+  input[type=checkbox]{width:15px;height:15px;accent-color:var(--accent)}
+  header{min-height:76px;padding:14px 24px;gap:20px;background:#1e2125}
+  .brand{display:flex;align-items:center;gap:10px;background:none;border:0;padding:0;white-space:nowrap}
+  .brand:hover{background:none}
+  .brand-mark{display:grid;place-items:center;width:35px;height:39px;border-radius:11px;background:var(--accent);color:#202a35;font:700 17px var(--mono);transform:rotate(-6deg)}
+  .brand-name{font-size:19px;font-weight:650;letter-spacing:-.8px}
+  .brand-name em{font-family:Georgia,serif;font-weight:400;color:var(--accent)}
+  .review-context{min-width:0;flex:1;border-left:1px solid var(--line);padding-left:20px}
+  .eyebrow{color:var(--dim);font-size:10px;font-weight:600;letter-spacing:.15em;text-transform:uppercase}
+  header .rng{display:block;max-width:100%;overflow:hidden;text-overflow:ellipsis;margin-top:3px;background:none;border:0;padding:0;text-align:left;font-size:11px}
+  .top-progress{width:130px;flex-shrink:0;display:flex;flex-direction:column;gap:7px;font-size:11px;color:var(--dim)}
+  .bar{flex:none;min-width:0;width:100%;height:4px}
+  .bar>i{background:var(--accent)}
+  .primary,#next{background:var(--accent);border-color:var(--accent);color:#202a35;font-weight:650}
+  .primary:hover,#next:hover{background:#c4d4e5;box-shadow:0 3px 16px #a9bfd820}
+  #wrap{padding:16px;gap:16px}
+  aside{width:285px;border:1px solid var(--line);border-radius:14px;display:flex;flex-direction:column;overflow:hidden}
+  aside>.head{position:static;padding:17px 16px;border:0;font-size:10px;letter-spacing:.1em}
+  #cct{font-size:10px;letter-spacing:0;text-transform:none}
+  .file-search{margin:0 12px 12px;position:relative}
+  .file-search input{width:100%;font-family:inherit;font-size:12px;line-height:1.5;color:var(--fg);background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:9px 12px}
+  .file-search input::placeholder{color:var(--dim)}
+  #list{overflow:auto;flex:1;padding:0 7px 10px}
+  .f{margin:3px 0;padding:11px 9px;gap:10px;border:1px solid transparent;border-radius:8px}
+  .f.sel{background:#2c3642;border-color:#536477;box-shadow:none}
+  .f.done .nm{text-decoration:none;color:var(--dim)}
+  .f .nm{font-size:12px;word-break:normal;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .f .dir{color:var(--dim);font:10px/1.5 var(--mono);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;margin-top:2px}
+  .f .sub{margin-top:5px;font-size:10px}
+  .f.ov{margin-bottom:14px;padding:13px 12px}
+  .f.ov .nm{font-family:inherit;font-size:13px;font-weight:600}
+  .shortcuts{flex:0 0 auto;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:6px 16px;padding:9px 16px;border-top:1px solid var(--line);background:var(--bg2)}
+  .shortcuts button{display:flex;align-items:center;gap:7px;background:transparent;border-color:transparent;font-size:11px;padding:4px 6px;white-space:nowrap}
+  .shortcuts button:hover{background:var(--bg3);border-color:var(--line)}
+  .shortcuts kbd{color:var(--accent);min-width:21px;text-align:center;padding:1px 5px}
+  .shortcuts .compose-hint{color:var(--dim);font-size:10px;white-space:nowrap}
+  tr.code-row.current-line td.code{box-shadow:inset 3px 0 var(--accent)}
+  main{border:1px solid var(--line);border-radius:14px;background:var(--bg);scrollbar-color:#515b67 transparent}
+  .ovw{max-width:1480px;margin:auto;padding:32px}
+  .hero{position:relative;display:flex;justify-content:space-between;align-items:center;gap:24px;padding:4px 0 30px}
+  .hero h1{font-size:clamp(28px,3vw,43px);line-height:1.15;font-weight:550;letter-spacing:-1.7px;margin:12px 0}
+  .hero h1 em{font-family:Georgia,serif;color:var(--accent);font-weight:400}
+  .hero p{color:var(--dim);font-size:13px;margin:0 0 20px;max-width:480px;line-height:1.7}
+  .hero-art{width:170px;height:170px;flex-shrink:0}
+  .hero-actions{display:flex;align-items:center;gap:14px}
+  .hero-actions span{font-size:11px;color:var(--dim)}
+  .tiles{grid-template-columns:repeat(4,minmax(0,1fr));gap:0;border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--bg2)}
+  .tile{border:0;border-radius:0;padding:18px 20px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);background:transparent;min-width:0}
+  .tile:nth-child(4n){border-right:0}.tile:nth-child(n+5){border-bottom:0}
+  .tile .k{font-size:10px;letter-spacing:.09em}
+  .tile .v{font:500 28px/1.2 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;letter-spacing:-.8px;margin:9px 0 5px}
+  .tile .s{font-size:10px;line-height:1.6;overflow-wrap:anywhere}
+  .tile:nth-child(2) .v{color:var(--addln)}.tile:nth-child(3) .v{color:var(--delln)}
+  .sec{margin-top:26px}.sec .h{font-size:10px;letter-spacing:.1em;margin-bottom:12px}
+  .meter{height:8px;background:var(--bg3)}.meter>i{background:var(--accent);border-radius:9px;transition:width .25s}
+  .progress-panel{padding:18px 20px;background:#242a31;border:1px solid #424e5c;border-radius:12px}
+  .progress-panel .h{color:var(--fg)}
+  .brow{padding:9px 10px;border-bottom:1px solid #30363d;border-radius:0;grid-template-columns:minmax(100px,2fr) minmax(70px,2fr) 110px}
+  .brow .p{font-size:11px}.bar2{height:7px;background:#262b31}
+  .brow[role=button]:hover{background:var(--bg3);border-radius:6px}
+  .brow:not([role=button]){cursor:default}
+  .chip{padding:4px 10px}
+  .fhead{padding:20px 24px;background:#22262b}.fhead h1{font-size:15px;margin-bottom:12px}
+  .fhead .row{gap:16px;font-size:11px}
+  .notes{padding:16px 24px;background:#1e2125}.notes .lbl{font-size:10px}
+  textarea{padding:10px 12px;background:#191c20;border-radius:8px;line-height:1.65}
+  table.diff{font-size:12px;line-height:1.8}td.ln{color:#9fa9b5;background:#20252b}
+  tr.hunk td{padding:8px;color:#b4bfcc;background:#2b323c}
+  tr.add td.ln{background:#24344d}tr.del td.ln{background:#3b2828}
+  tr.cmt td{background:#22262b;padding-top:12px;padding-bottom:12px}
+  .bub{padding:10px 12px;border-radius:10px}.acts{margin-top:8px;margin-bottom:8px}
+  .who .tools{opacity:.7}.msg:focus-within .who .tools{opacity:1}
+  .hint{padding:14px 24px;color:var(--dim);line-height:2}
+  .empty{padding:64px 24px}.empty strong{display:block;color:var(--fg);font-size:21px;margin-bottom:8px}
+  .toast{position:fixed;bottom:calc(var(--shortcuts-height,100px) + 12px);left:50%;transform:translate(-50%,15px);max-width:calc(100% - 32px);background:var(--accent);color:#202a35;padding:12px 20px;border-radius:12px;box-shadow:0 8px 32px #0006;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;z-index:10}
+  .toast.on{opacity:1;transform:translate(-50%,0)}
+  @media(min-width:1500px){aside{width:310px}.ovw{padding:40px 48px}}
+  @media(max-width:1150px){header{gap:12px;padding:14px 18px}.top-progress{width:100px}#me{display:none}.opt{font-size:11px}aside{width:245px}.ovw{padding:24px}.hero-art{width:125px;height:145px}.tile{padding:15px 13px}}
+  @media(max-width:900px){header{flex-wrap:wrap}.review-context{flex-basis:45%}.top-progress{flex:1}#wrap{gap:10px;padding:10px}aside{width:210px}.hero-art{display:none}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.tile:nth-child(2n){border-right:0}.tile:nth-child(n+5){border-bottom:1px solid var(--line)}.tile:nth-child(n+7){border-bottom:0}.legend{font-size:9px;gap:6px}.brow{grid-template-columns:minmax(80px,1fr) 65px 85px;gap:8px}}
+  @media(max-width:600px){header{padding:12px;gap:10px}.brand-name{font-size:17px}.review-context{padding-left:10px}.top-progress{display:none}.opt{margin-right:auto}#next,#refresh{font-size:11px;padding:6px 9px}#wrap{flex-direction:column}aside{width:100%;max-height:230px;flex-shrink:0}aside>.head{padding:10px 14px}.file-search{margin-bottom:6px}#list{min-height:65px}.f{padding:7px 9px}.f.ov{margin-bottom:5px}main{flex:1;min-height:0}.ovw{padding:20px}.hero{padding-bottom:24px}.hero h1{font-size:30px}.hero-actions span{display:none}.fhead,.notes{padding:14px}.legend{display:none}col.c-ln{width:35px}tr.cmt td{padding-left:10px}}
+  @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
 </style>
 </head>
 <body>
 <header>
-  <span class="rng" id="rng"></span>
-  <div class="bar"><i id="fill"></i></div>
-  <span id="pct">0 / 0</span>
+  <button class="brand" id="brand" aria-label="diff & tonic overview"><span class="brand-mark" aria-hidden="true">±</span><span class="brand-name">diff <em>&amp;</em> tonic</span></button>
+  <div class="review-context"><div class="eyebrow" id="repo-name">Your review, on the rocks</div><button class="rng" id="rng"></button></div>
+  <div class="top-progress"><span id="pct">0 / 0</span><div class="bar"><i id="fill"></i></div></div>
   <label class="opt" id="agwrap" title="flag every new comment for an agent reply">
     <input type="checkbox" id="ag"> Agent replies <span id="agn"></span>
   </label>
   <span class="me" id="me"></span>
-  <button id="next">Next unreviewed</button>
+  <button id="next" title="Next unreviewed file (u)">Next unreviewed ↗</button>
   <button id="refresh" title="re-run git diff">Refresh</button>
 </header>
 <div id="wrap">
   <aside>
     <div class="head"><span>Changed files</span><span id="cct"></span></div>
+    <div class="file-search"><input id="file-filter" type="search" placeholder="Find a file…" aria-label="Find a file" autocomplete="off"></div>
     <div id="list"></div>
   </aside>
-  <main id="main"><div class="empty">Loading…</div></main>
+  <main id="main" tabindex="0" aria-label="Review content"><div class="empty">Loading…</div></main>
 </div>
+<nav class="shortcuts" aria-label="Keyboard shortcuts">
+  <button id="key-prev" aria-keyshortcuts="h [" title="Previous file (H or [)"><kbd>H</kbd> Previous</button>
+  <button id="key-next" aria-keyshortcuts="l ]" title="Next file (L or ])"><kbd>L</kbd> Next</button>
+  <button id="key-scroll-down" aria-keyshortcuts="j Shift+j" title="Scroll down; Shift+J moves a page"><kbd>J</kbd> Down</button>
+  <button id="key-scroll-up" aria-keyshortcuts="k Shift+k" title="Scroll up; Shift+K moves a page"><kbd>K</kbd> Up</button>
+  <button id="key-comment" aria-keyshortcuts="i c" title="Comment on the selected line, or the first visible line" disabled><kbd>I</kbd> Comment</button>
+  <button id="key-approve" aria-keyshortcuts="o r" disabled><kbd>O</kbd> <span>Approve file</span></button>
+  <button id="key-unreviewed" aria-keyshortcuts="u"><kbd>U</kbd> Unreviewed</button>
+  <button id="key-overview" aria-keyshortcuts="p"><kbd>P</kbd> Overview</button>
+  <span class="compose-hint"><kbd>Shift J / K</kbd> page · <kbd>[ ]</kbd> switch files</span>
+  <span class="compose-hint"><kbd>⌘ / Ctrl ↵</kbd> save · <kbd>Esc</kbd> cancel</span>
+</nav>
+<div class="toast" id="toast" role="status" aria-live="polite"></div>
 <script>
 const LANG = {js:'javascript',jsx:'javascript',mjs:'javascript',cjs:'javascript',ts:'typescript',tsx:'typescript',
   py:'python',rb:'ruby',go:'go',rs:'rust',java:'java',kt:'kotlin',scala:'scala',swift:'swift',
@@ -848,6 +951,26 @@ let ROWS = [];                                      // current file's diff rows
 
 const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const $ = s => document.querySelector(s);
+let toastTimer;
+function toast(message){
+  $('#toast').textContent = message;
+  $('#toast').classList.add('on');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => $('#toast').classList.remove('on'), 3200);
+}
+function keyboardClick(el){
+  el.tabIndex = 0;
+  el.setAttribute('role', 'button');
+  el.onkeydown = e => {
+    if (e.target !== el || !['Enter', ' '].includes(e.key)) return;
+    e.preventDefault(); el.click();
+  };
+}
+function pathLabel(path){
+  const parts = path.split('/'), name = parts.pop();
+  return '<div class="nm">' + esc(name) + '</div>' +
+    (parts.length ? '<div class="dir">' + esc(parts.join('/')) + '/</div>' : '');
+}
 
 /* ---- avatars: deterministic inline SVG, nothing fetched ---------------- */
 function fnv(s){
@@ -890,8 +1013,8 @@ function agentAvatar(size){
   size = size || 22;
   return '<svg class="av agent" width="' + size + '" height="' + size + '" viewBox="0 0 22 22">' +
     '<defs><linearGradient id="agrad" x1="0" y1="0" x2="1" y2="1">' +
-    '<stop offset="0" stop-color="#f0883e"/><stop offset=".5" stop-color="#db61a2"/>' +
-    '<stop offset="1" stop-color="#8957e5"/></linearGradient></defs>' +
+    '<stop offset="0" stop-color="#b5c8db"/><stop offset=".5" stop-color="#91acc6"/>' +
+    '<stop offset="1" stop-color="#6b8eaf"/></linearGradient></defs>' +
     '<rect width="22" height="22" rx="7" fill="url(#agrad)"/>' +
     '<path d="M11 3.4 12.35 8.6 17.2 6.6 14.1 11 17.2 15.4 12.35 13.4 11 18.6 9.65 13.4 4.8 15.4 7.9 11 4.8 6.6 9.65 8.6Z" ' +
     'fill="#fff" fill-opacity=".93"/></svg>';
@@ -951,11 +1074,18 @@ const fileOf = p => FILES.find(f => f.path === p);
 
 async function save(path, patch){
   const f = fileOf(path);
+  const wasReviewed = f.state.reviewed;
   Object.assign(f.state, patch);          // optimistic
   renderTop(); renderList();
   const r = await api('/api/file', {path, patch});
   f.state = r.state;
   renderTop(); renderList();
+  if (patch.reviewed && !wasReviewed){
+    const t = totals();
+    toast(t.n && t.done === t.n ? 'All files reviewed. That deserves a tonic. ✓' :
+      '✓ Reviewed · ' + (t.n - t.done) + ' files to go');
+  }
+  if (cur === null && document.querySelector('.ovw')) showOverview();
   return r.state;
 }
 
@@ -966,8 +1096,9 @@ function renderTop(){
   $('#fill').style.width = n ? (100*done/n) + '%' : '0';
   $('#pct').textContent = done + ' / ' + n + ' reviewed';
   $('#rng').innerHTML = 'git diff <b>' + esc(META.range||'') + '</b>';
-  $('#rng').title = 'overall diff stats (o)';
+  $('#rng').title = 'overall diff stats (p)';
   $('#rng').onclick = showOverview;
+  $('#repo-name').textContent = (META.repo || '').split('/').filter(Boolean).pop() || 'Local review';
   const t0 = totals();
   $('#cct').textContent = t0.comments
     ? t0.openThreads + ' open / ' + t0.comments + ' thread' + (t0.comments>1?'s':'') : '';
@@ -979,23 +1110,35 @@ function renderTop(){
   $('#me').innerHTML = humanAvatar((META.user||{}).seed || 'you', 20);
   $('#me').title = 'you';
   document.title = '(' + done + '/' + n + ') diff & tonic';
+  renderShortcuts();
+}
+
+function renderShortcuts(){
+  const f = cur && fileOf(cur);
+  const ready = !!f && !!$('#rv');
+  $('#key-approve').disabled = !ready || f.stale;
+  $('#key-approve span').textContent = f && f.state.reviewed ? 'Undo approval' : 'Approve file';
+  $('#key-comment').disabled = !ready;
+  $('#key-prev').disabled = !FILES.length;
+  $('#key-next').disabled = !FILES.length;
 }
 
 /* ----------------------------------------------------------------- sidebar */
 function renderList(){
   const el = $('#list');
   el.innerHTML = '';
-  if (!FILES.length){ el.innerHTML = '<div class="empty">No changes in range.</div>'; return; }
+  const query = $('#file-filter').value.trim().toLowerCase();
   const t = totals();
   const ov = document.createElement('div');
   ov.className = 'f ov' + (cur === null ? ' sel' : '');
-  ov.innerHTML = '<div class="body"><div class="nm">\u25C6 Overview</div><div class="sub">' +
+  ov.innerHTML = '<div class="body"><div class="nm">◈ &nbsp; Review overview</div><div class="sub">' +
     '<span>' + t.n + ' files</span><span class="plus">+' + t.adds + '</span>' +
     '<span class="minus">\u2212' + t.dels + '</span></div></div>';
   ov.onclick = showOverview;
+  keyboardClick(ov);
   el.appendChild(ov);
   for (const f of FILES){
-    if (f.stale) continue;
+    if (f.stale || !f.path.toLowerCase().includes(query)) continue;
     const st = f.status[0];
     const div = document.createElement('div');
     div.className = 'f' + (f.path === cur ? ' sel' : '') + (f.state.reviewed ? ' done' : '');
@@ -1003,7 +1146,7 @@ function renderList(){
     const nopen = f.state.comments.filter(x => !x.resolved).length;
     div.innerHTML =
       '<input type="checkbox"' + (f.state.reviewed ? ' checked' : '') + '>' +
-      '<div class="body"><div class="nm">' + esc(f.path) + '</div><div class="sub">' +
+      '<div class="body">' + pathLabel(f.path) + '<div class="sub">' +
         '<span class="st ' + esc(st) + '">' + esc(f.status) + '</span>' +
         (f.adds === null ? '<span>binary</span>' :
           '<span class="plus">+' + f.adds + '</span><span class="minus">−' + f.dels + '</span>') +
@@ -1019,10 +1162,13 @@ function renderList(){
       save(f.path, {reviewed: ev.target.checked});
     };
     div.onclick = () => select(f.path);
+    div.title = f.path;
+    div.querySelector('input').setAttribute('aria-label', 'Mark ' + f.path + ' reviewed');
+    keyboardClick(div);
     el.appendChild(div);
   }
 
-  const stale = FILES.filter(f => f.stale);
+  const stale = FILES.filter(f => f.stale && f.path.toLowerCase().includes(query));
   if (stale.length){
     const h = document.createElement('div');
     h.className = 'head';
@@ -1034,15 +1180,23 @@ function renderList(){
       const nopen = f.state.comments.filter(x => !x.resolved).length;
       const div = document.createElement('div');
       div.className = 'f stale' + (f.path === cur ? ' sel' : '');
-      div.innerHTML = '<div class="body"><div class="nm">' + esc(f.path) + '</div><div class="sub">' +
+      div.innerHTML = '<div class="body">' + pathLabel(f.path) + '<div class="sub">' +
         (f.state.comments.length
           ? '<span class="cbadge' + (nopen ? '' : ' settled') + '">' +
             (nopen ? nopen : '\u2713 ' + f.state.comments.length) + '</span>' : '') +
         (f.state.notes.trim() ? '<span title="has notes">\u{1F4DD}</span>' : '') +
         '</div></div>';
       div.onclick = () => select(f.path);
+      div.title = f.path;
+      keyboardClick(div);
       el.appendChild(div);
     }
+  }
+  if (!FILES.some(f => f.path.toLowerCase().includes(query))){
+    const empty = document.createElement('div');
+    empty.className = 'empty';
+    empty.textContent = query ? 'No files match your search.' : 'No changed files. All clear.';
+    el.appendChild(empty);
   }
 }
 
@@ -1053,6 +1207,7 @@ async function select(path){
   renderList();
   const f = fileOf(path);
   $('#main').innerHTML = '<div class="empty">Loading diff…</div>';
+  renderShortcuts();
   let rows;
   try { rows = (await api('/api/diff?path=' + encodeURIComponent(path))).rows; }
   catch (e) { $('#main').innerHTML = '<div class="empty">' + esc(String(e)) + '</div>'; return; }
@@ -1108,18 +1263,15 @@ function drawFile(f, rows){
       '<td class="ln">' + (r.new != null ? r.new : '') + '</td>' +
       '<td class="code"><span class="sig">' + sign + '</span> ' + hl(r.text, lang) + '</td>';
     tr.querySelectorAll('.ln').forEach(td => td.onclick = () => toggle(r.k));
+    tr.querySelector('.code').onclick = () => {
+      document.querySelectorAll('.current-line').forEach(row => row.classList.remove('current-line'));
+      tr.classList.add('current-line');
+    };
     tr.querySelector('.code').ondblclick = () => toggle(r.k);
     tb.appendChild(tr);
   });
   tbl.appendChild(tb);
   m.appendChild(tbl);
-
-  const hint = document.createElement('div');
-  hint.className = 'hint';
-  hint.innerHTML = 'Click a line number (or double-click a line) to comment · ' +
-    '<kbd>⌘/Ctrl+Enter</kbd> save comment · <kbd>[</kbd> <kbd>]</kbd> prev/next file · ' +
-    '<kbd>r</kbd> toggle reviewed · <kbd>u</kbd> next unreviewed · <kbd>o</kbd> overview';
-  m.appendChild(hint);
 
   $('#main').innerHTML = '';
   $('#main').appendChild(m);
@@ -1137,10 +1289,39 @@ function drawFile(f, rows){
     }, 400);
   };
   paintComments(f);
+  renderShortcuts();
 }
 
 function redrawHead(f){
   const cb = $('#rv'); if (cb) cb.checked = f.state.reviewed;
+  renderShortcuts();
+}
+
+function approveFile(){
+  const f = cur && fileOf(cur);
+  if (!f || f.stale || !$('#rv')) return;
+  save(cur, {reviewed: !f.state.reviewed}).then(() => {
+    if (cur === f.path) redrawHead(f);
+  });
+}
+
+function addComment(){
+  if (!cur || !$('#rv')) return;
+  const existing = document.querySelector('.cmt-ed textarea');
+  if (existing){ existing.focus(); return; }
+  const panel = $('#main').getBoundingClientRect();
+  const top = Math.max(panel.top, $('.fhead').getBoundingClientRect().bottom);
+  const visible = row => {
+    const bounds = row.getBoundingClientRect();
+    return bounds.bottom > top && bounds.top < panel.bottom;
+  };
+  const selected = document.querySelector('.current-line');
+  const rows = [...document.querySelectorAll('tr.code-row')];
+  const row = selected && visible(selected) ? selected : rows.find(visible) || rows[0];
+  if (!row){ $('#nt').focus(); toast('No code lines in this file. Add your thoughts in File notes.'); return; }
+  document.querySelectorAll('.current-line').forEach(r => r.classList.remove('current-line'));
+  row.classList.add('current-line');
+  toggle(row.dataset.k);
 }
 
 /* --------------------------------------------------------------- comments */
@@ -1471,7 +1652,8 @@ function churnRows(items, max, onClick){
                  : bar(it.adds, it.dels, max, it.label + ': +' + it.adds + ' \u2212' + it.dels)) +
       '<div class="nums"><span class="plus">+' + it.adds + '</span> ' +
         '<span class="minus">\u2212' + it.dels + '</span></div>';
-    if (onClick) r.onclick = () => onClick(it);
+    if (onClick){ r.onclick = () => onClick(it); keyboardClick(r); }
+    r.title = it.label;
     wrap.appendChild(r);
   }
   return wrap;
@@ -1489,6 +1671,7 @@ const LEGEND = '<span class="legend"><span><i class="sw" style="background:var(-
 
 function showOverview(){
   cur = null;
+  renderShortcuts();
   if (location.hash) history.replaceState(null, '', location.pathname);
   renderList();
   const t = totals(), st = META.stats || {commits:0, authors:[]};
@@ -1500,6 +1683,30 @@ function showOverview(){
   const pct = t.n ? Math.round(100 * t.done / t.n) : 0;
   const dirtyBits = Object.entries(t.byDirty)
     .map(([k,v]) => v + ' ' + (k === 'untracked' ? 'new' : k)).join(' \u00b7 ');
+
+  const complete = t.n > 0 && t.done === t.n;
+  const hero = document.createElement('div');
+  hero.className = 'hero';
+  hero.innerHTML = '<div><div class="eyebrow">A fresh perspective on your code</div>' +
+    '<h1>' + (!t.n ? 'Nothing to stir <em>just yet.</em>' : complete ? 'All reviewed. <em>Cheers.</em>' : 'Big diff. <em>Small sips.</em>') + '</h1>' +
+    '<p>' + (!t.n ? 'No changes between these refs. Make a change, then refresh to pour your next review.' :
+      complete ? 'Every file checked off. Your notes and conversations are right here whenever you need them.' :
+      'A little clarity, one file at a time. Settle in, follow the changes, and leave your thoughts along the way.') + '</p>' +
+    (t.n && !complete ? '<div class="hero-actions"><button class="primary" id="continue-review">' +
+      (t.done ? 'Continue review' : 'Start reviewing') + ' ↗</button><span>' + (t.n-t.done) + ' files to explore · <kbd>u</kbd> to jump in</span></div>' : '') +
+    '</div><svg class="hero-art" viewBox="0 0 180 180" aria-hidden="true">' +
+    '<circle cx="91" cy="91" r="76" fill="#252c34"/><circle cx="91" cy="91" r="75" fill="none" stroke="#475566" stroke-dasharray="2 7"/>' +
+    '<g transform="rotate(9 90 90)"><path d="M60 54h66l-8 99H68Z" fill="#2d3743" stroke="#b6c5d6" stroke-width="2"/>' +
+    '<path d="M65 92q16-9 29 0t27 0l-5 57H70Z" fill="#a9bfd8" fill-opacity=".18"/>' +
+    '<rect x="75" y="75" width="23" height="23" rx="5" fill="#a9bfd8" fill-opacity=".15" stroke="#8498af" transform="rotate(-14 86 86)"/>' +
+    '<rect x="90" y="107" width="22" height="22" rx="5" fill="#a9bfd8" fill-opacity=".12" stroke="#8498af" transform="rotate(17 101 118)"/>' +
+    '<path d="m100 91 17-59h15" fill="none" stroke="#a9bfd8" stroke-width="4" stroke-linecap="round"/>' +
+    '<circle cx="62" cy="57" r="24" fill="#a9bfd8" stroke="#1e2731" stroke-width="3"/>' +
+    '<circle cx="62" cy="57" r="18" fill="none" stroke="#5d7896"/>' +
+    '<path d="M62 39v36M44 57h36M49 44l26 26M49 70l26-26" stroke="#5d7896" stroke-width="1.5"/>' +
+    '<circle cx="81" cy="120" r="2" fill="#a9bfd8"/><circle cx="104" cy="141" r="2" fill="#a9bfd8"/>' +
+    '</g><path d="M143 64h12m-6-6v12M34 107h10m-5-5v10" stroke="#a9bfd8" stroke-width="2" stroke-linecap="round"/></svg>';
+  m.appendChild(hero);
 
   const tiles = document.createElement('div');
   tiles.className = 'tiles';
@@ -1524,6 +1731,7 @@ function showOverview(){
   m.appendChild(tiles);
 
   const prog = sec('Review progress');
+  prog.classList.add('progress-panel');
   const meter = document.createElement('div');
   meter.className = 'meter';
   meter.innerHTML = '<i style="width:' + pct + '%"></i>';
@@ -1570,6 +1778,8 @@ function showOverview(){
 
   $('#main').innerHTML = '';
   $('#main').appendChild(m);
+  const start = $('#continue-review');
+  if (start) start.onclick = nextUnreviewed;
   const btn = $('#ovall');
   if (btn) btn.onclick = () => { ovwAll = !ovwAll; showOverview(); };
   $('#main').scrollTop = 0;
@@ -1585,32 +1795,71 @@ function step(d){
 function nextUnreviewed(){
   const i = FILES.findIndex(f => f.path === cur);
   const order = FILES.slice(i + 1).concat(FILES.slice(0, i + 1));
-  const t = order.find(f => !f.state.reviewed);
-  if (t) select(t.path); else alert('All ' + FILES.length + ' files reviewed ✓');
+  const t = order.find(f => !f.stale && !f.state.reviewed);
+  if (t) select(t.path);
+  else { showOverview(); toast(totals().n ? 'All files reviewed. That deserves a tonic. ✓' : 'No changed files. All clear.'); }
+}
+
+function scrollReview(key){
+  const panel = $('#main');
+  const page = Math.max(64, panel.clientHeight - ($('.fhead')?.offsetHeight || 0) - 32);
+  const distance = {ArrowDown:64, ArrowUp:-64, PageDown:page, PageUp:-page};
+  if (Object.hasOwn(distance, key)) panel.scrollBy({top:distance[key], behavior:'instant'});
+  else if (key === 'Home') panel.scrollTo({top:0, behavior:'instant'});
+  else if (key === 'End') panel.scrollTo({top:panel.scrollHeight, behavior:'instant'});
+  else return false;
+  return true;
 }
 
 document.addEventListener('keydown', e => {
   const t = e.target.tagName;
-  if (t === 'TEXTAREA' || t === 'INPUT' || e.metaKey || e.ctrlKey || e.altKey) return;
-  if (e.key === ']') step(1);
-  else if (e.key === '[') step(-1);
-  else if (e.key === 'u') nextUnreviewed();
-  else if (e.key === 'o') showOverview();
-  else if (e.key === 'r' && cur){
-    const f = fileOf(cur);
-    save(cur, {reviewed: !f.state.reviewed}).then(() => redrawHead(f));
+  if (t === 'TEXTAREA' || t === 'INPUT' || t === 'SELECT' || e.target.isContentEditable ||
+      e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || e.isComposing) return;
+  const key = e.key.toLowerCase();
+  if (key === 'j' || key === 'k'){
+    e.preventDefault();
+    scrollReview(key === 'j' ? (e.shiftKey ? 'PageDown' : 'ArrowDown')
+                            : (e.shiftKey ? 'PageUp' : 'ArrowUp'));
+    return;
   }
+  if (!e.shiftKey && scrollReview(e.key)){ e.preventDefault(); return; }
+  if (e.repeat) return;
+  const action = {l: () => step(1), h: () => step(-1), ']': () => step(1), '[': () => step(-1),
+                  u: nextUnreviewed, p: showOverview, o: approveFile, i: addComment,
+                  r: approveFile, c: addComment}[key];
+  if (action){ e.preventDefault(); action(); }
 });
 $('#ag').onchange = async e => {
   await api('/api/option', {agent_replies: e.target.checked});
   await sync(true);
 };
 $('#next').onclick = nextUnreviewed;
+$('#key-prev').onclick = () => step(-1);
+$('#key-next').onclick = () => step(1);
+$('#key-scroll-down').onclick = () => scrollReview('ArrowDown');
+$('#key-scroll-up').onclick = () => scrollReview('ArrowUp');
+$('#key-approve').onclick = approveFile;
+$('#key-comment').onclick = addComment;
+$('#key-unreviewed').onclick = nextUnreviewed;
+$('#key-overview').onclick = showOverview;
+if (window.ResizeObserver){
+  new ResizeObserver(([entry]) => {
+    document.documentElement.style.setProperty('--shortcuts-height', entry.target.offsetHeight + 'px');
+  }).observe($('.shortcuts'));
+}
+$('#brand').onclick = showOverview;
+$('#file-filter').oninput = renderList;
 $('#refresh').onclick = async () => {
-  const d = await api('/api/refresh', {});
-  FILES = d.files; META = d.meta;
-  renderTop(); renderList();
-  if (cur && fileOf(cur)) select(cur); else if (FILES.length) select(FILES[0].path);
+  const button = $('#refresh');
+  button.disabled = true; button.textContent = 'Refreshing…';
+  try {
+    const d = await api('/api/refresh', {});
+    FILES = d.files; META = d.meta;
+    renderTop(); renderList();
+    if (cur && fileOf(cur)) await select(cur); else showOverview();
+    toast('Fresh diff, ready to review.');
+  } catch(e){ toast('Could not refresh: ' + e.message); }
+  finally { button.disabled = false; button.textContent = 'Refresh'; }
 };
 
 (async () => {
@@ -1621,8 +1870,7 @@ $('#refresh').onclick = async () => {
   renderTop(); renderList();
   const want = decodeURIComponent((location.hash.match(/^#f=(.*)$/) || [])[1] || '');
   if (want && fileOf(want)) select(want);
-  else if (FILES.length) showOverview();      // land on the totals, not file #1
-  else $('#main').innerHTML = '<div class="empty">No changes between these refs.</div>';
+  else showOverview();
 })();
 </script>
 </body>
