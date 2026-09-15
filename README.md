@@ -20,7 +20,7 @@ Review a big diff in your browser · comment on lines · hand the comments to an
 │ git diff main..feature  ███████░░░░░░  12/39 reviewed  ✦ 3 waiting        │
 ├─────────────────────┬─────────────────────────────────────────────────────┤
 │ ◆ Overview          │ src/monoova/Mapper.java     main → working tree     │
-│ ☑ forge.yml      ✓2 │                                                     │
+│ ☑ app.yml        ✓2 │                                                     │
 │ ☐ Mapper.java   ● 1 │  41  41   if (code.contains("NOT_FOUND")) {         │
 │ ☐ application.yml   │  42   -       return NO_MATCH;                      │
 │ ☐ CLAUDE.md      ✦1 │      42 +     return unavailable(code);             │
