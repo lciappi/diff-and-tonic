@@ -26,6 +26,7 @@ State lives in <repo>/.review/state.json. Nothing leaves your machine.
 """
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -327,6 +328,165 @@ def file_diff(repo, entry):
     return rows
 
 
+# -------------------------------------------------------- definition lookup
+
+SOURCE_EXTENSIONS = ("py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "java",
+                     "kt", "kts", "scala", "go", "rs", "c", "h", "cc", "cpp",
+                     "hpp", "cs", "swift", "rb", "php", "groovy", "dart")
+MAX_SOURCE_BYTES = 1024 * 1024
+
+
+def source_revision(ctx, origin, side):
+    """Use the clicked diff's side, including merge bases and dirty fallbacks."""
+    if side not in ("L", "R"):
+        raise ValueError("side must be L or R")
+    entry = next((e for e in ctx["files"] if e["path"] == origin), None)
+    if entry is None:
+        raise ValueError("unknown origin file")
+    spec = entry.get("dspec")
+    if not spec:
+        ref = None if side == "R" and ctx["worktree"] else ctx["head" if side == "R" else "base"]
+    elif "..." in spec:
+        base, head = spec.split("...", 1)
+        ref = git(ctx["root"], "merge-base", base, head).strip() if side == "L" else head
+    elif ".." in spec:
+        base, head = spec.split("..", 1)
+        ref = base if side == "L" else head
+    else:
+        ref = spec if side == "L" else None
+    return git(ctx["root"], "rev-parse", ref + "^{commit}").strip() if ref else None
+
+
+def source_text(repo, path, revision, untracked=True):
+    """Only expose regular repository files; never follow worktree symlinks."""
+    if not path or path.startswith("/") or any(p in ("", ".", "..") for p in path.split("/")):
+        raise ValueError("invalid source path")
+    literal = ":(literal)" + path
+    if revision:
+        records = split_z(git(repo, "ls-tree", "-z", revision, "--", literal))
+        record = next((r for r in records if r.split("\t", 1)[-1] == path), None)
+        if not record or record.split()[0] not in ("100644", "100755"):
+            raise ValueError("source is not a regular repository file")
+        oid = record.split()[2]
+        if int(git(repo, "cat-file", "-s", oid)) > MAX_SOURCE_BYTES:
+            raise ValueError("source file exceeds the 1 MiB preview limit")
+        text = git(repo, "cat-file", "blob", oid)
+    else:
+        args = ["ls-files", "-z", "--cached"]
+        if untracked:
+            args += ["--others", "--exclude-standard"]
+        if path not in split_z(git(repo, *args, "--", literal)):
+            raise ValueError("source is not a repository file")
+        full = repo
+        for part in path.split("/"):
+            full = os.path.join(full, part)
+            if os.path.islink(full):
+                raise ValueError("symlink source files are not supported")
+        if not os.path.isfile(full):
+            raise ValueError("source is not a regular repository file")
+        try:
+            with open(full, "rb") as f:
+                data = f.read(MAX_SOURCE_BYTES + 1)
+        except OSError as e:
+            raise ValueError("source file is unavailable") from e
+        if len(data) > MAX_SOURCE_BYTES:
+            raise ValueError("source file exceeds the 1 MiB preview limit")
+        text = data.decode("utf-8", errors="replace")
+    if "\0" in text:
+        raise ValueError("binary source files are not supported")
+    return text
+
+
+def definition_lines(text, path, symbol):
+    """Python syntax trees; conservative declaration patterns for other languages.
+
+    This is a local lookup, not type or overload resolution. Keep all candidates
+    so the reviewer can choose when multiple declarations share a name.
+    """
+    ext = path.rsplit(".", 1)[-1].lower()
+    if ext in ("py", "pyi"):
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError):
+            pass  # incomplete working-tree code can still have useful declarations
+        else:
+            lines = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == symbol:
+                    lines.add(node.lineno)
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        for name in ast.walk(target):
+                            if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store) and name.id == symbol:
+                                lines.add(name.lineno)
+            return sorted(lines)
+    # Mask comments and quoted strings without changing offsets or line numbers.
+    quotes = r'''/\*[\s\S]*?\*/|//[^\n]*|"""[\s\S]*?"""|''' + "'''[\\s\\S]*?'''" + r'''|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`'''
+    if ext in ("py", "pyi", "rb", "php"):
+        quotes += r"|\#[^\n]*"
+    clean = re.sub(quotes, lambda m: re.sub(r"[^\n]", " ", m.group()), text)
+    if ext == "java":
+        clean = re.sub(r"@(?!interface\b)[\w.]+(?:\([^()\n]*\))?",
+                       lambda m: " " * len(m.group()), clean)
+    name = r"(?<![\w$])" + re.escape(symbol) + r"(?![\w$])"
+    patterns = [
+        r"\b(?:class|interface|enum|struct|trait|type|record|object|namespace|def|fun|fn|function)\s+(?:\*\s*)?(?P<name>" + name + r")",
+        r"\bfunc\s+(?:\([^\n]*\)\s*)?(?P<name>" + name + r")\s*(?:\[|\()",
+        r"\b(?:const|let|var|val)\s+(?P<name>" + name + r")\s*(?:[=:;]|\b)",
+    ]
+    if ext not in ("py", "pyi", "rb", "go", "rs"):
+        # Typed fields/methods and JS/TS method declarations. A bare foo(); is
+        # a call, while foo() { ... } or Type foo(...); is a declaration.
+        prefix = r"(?:(?:[\w$.]+(?:\s*<[^;{}()=]+>)?(?:\[\])?[?*&]?|<[^;{}()=]+>)[ \t]+)+"
+        signature = r"(?:<[^;{}()]+>)?\s*\([^;{}]*?\)\s*(?:throws\s+[\w.,\s]+)?(?:\s*:\s*[^;{}=]+)?\s*"
+        patterns += [
+            r"^[ \t]*(?P<prefix>" + prefix + r")(?P<name>" + name + r")\s*(?:" + signature + r"[{;]|[=;])",
+            r"^[ \t]*(?P<name>" + name + r")\s*" + signature + r"\{",
+            r"^[ \t]*(?P<name>" + name + r")\s*:\s*(?:async\s+)?(?:function\b|\([^;{}]*\)\s*=>)",
+        ]
+    lines = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, clean, re.MULTILINE):
+            prefix = match.groupdict().get("prefix") or ""
+            if set(re.findall(r"\w+", prefix)) & {"return", "throw", "new", "await", "yield", "case", "else", "import", "package", "default", "instanceof"}:
+                continue
+            lines.add(clean.count("\n", 0, match.start("name")) + 1)
+    return sorted(lines)
+
+
+def find_definitions(ctx, origin, side, symbol, current=None):
+    if not re.fullmatch(r"(?:[^\W\d]|\$)[\w$]*", symbol, re.UNICODE) or len(symbol) > 200:
+        raise ValueError("invalid symbol")
+    revision = source_revision(ctx, origin, side)
+    args = ["grep", "-l", "-z", "-I", "-F", "-w"]
+    if revision is None and ctx["untracked"]:
+        args += ["--untracked", "--exclude-standard"]
+    args += ["-e", symbol]
+    if revision:
+        args.append(revision)
+    args += ["--"] + ["*." + ext for ext in SOURCE_EXTENSIONS]
+    paths = split_z(git(ctx["root"], *args, ok=(0, 1)))
+    if revision:
+        paths = [p.removeprefix(revision + ":") for p in paths]
+    entry = next(e for e in ctx["files"] if e["path"] == origin)
+    current = current or (entry.get("old") if side == "L" else None) or origin
+    paths.sort(key=lambda p: (p != current, os.path.dirname(p) != os.path.dirname(current), p))
+    matches, skipped = [], 0
+    for path in paths[:200]:
+        try:
+            text = source_text(ctx["root"], path, revision, ctx["untracked"])
+        except ValueError:
+            skipped += 1
+            continue
+        lines = text.splitlines()
+        for line in definition_lines(text, path, symbol):
+            matches.append({"path": path, "line": line, "text": lines[line - 1].strip()[:240]})
+    return {"symbol": symbol, "revision": revision or "working tree",
+            "matches": matches[:100], "truncated": len(paths) > 200 or len(matches) > 100,
+            "skipped": skipped}
+
+
 # --------------------------------------------------------------------- state
 
 class Store:
@@ -601,6 +761,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"version": self.ctx["store"].version()})
             if u.path == "/api/state":
                 return self._json(self.ctx["store"].data)
+            if u.path in ("/api/definitions", "/api/source"):
+                origin = (q.get("origin") or [""])[0]
+                side = (q.get("side") or ["R"])[0]
+                if u.path == "/api/definitions":
+                    return self._json(find_definitions(
+                        self.ctx, origin, side, (q.get("symbol") or [""])[0],
+                        (q.get("path") or [None])[0]))
+                revision = source_revision(self.ctx, origin, side)
+                path = (q.get("path") or [""])[0]
+                source = source_text(self.ctx["root"], path, revision, self.ctx["untracked"])
+                return self._json({"path": path, "revision": revision or "working tree",
+                                   "lines": source.splitlines()})
             if u.path == "/api/diff":
                 path = (q.get("path") or [""])[0]
                 entry = next((e for e in self.ctx["files"] if e["path"] == path), None)
@@ -610,6 +782,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._backfill_snippets(path, rows)
                 return self._json({"path": path, "rows": rows})
             return self._err("not found", 404)
+        except ValueError as e:
+            return self._err(e)
         except GitError as e:
             return self._err(e, 500)
 
@@ -902,6 +1076,21 @@ PAGE = r"""<!doctype html>
   @media(max-width:900px){header{flex-wrap:wrap}.review-context{flex-basis:45%}.top-progress{flex:1}#wrap{gap:10px;padding:10px}aside{width:210px}.hero-art{display:none}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.tile:nth-child(2n){border-right:0}.tile:nth-child(n+5){border-bottom:1px solid var(--line)}.tile:nth-child(n+7){border-bottom:0}.legend{font-size:9px;gap:6px}.brow{grid-template-columns:minmax(80px,1fr) 65px 85px;gap:8px}}
   @media(max-width:600px){header{padding:12px;gap:10px}.brand-name{font-size:17px}.review-context{padding-left:10px}.top-progress{display:none}.opt{margin-right:auto}#next,#refresh{font-size:11px;padding:6px 9px}#wrap{flex-direction:column}aside{width:100%;max-height:230px;flex-shrink:0}aside>.head{padding:10px 14px}.file-search{margin-bottom:6px}#list{min-height:65px}.f{padding:7px 9px}.f.ov{margin-bottom:5px}main{flex:1;min-height:0}.ovw{padding:20px}.hero{padding-bottom:24px}.hero h1{font-size:30px}.hero-actions span{display:none}.fhead,.notes{padding:14px}.legend{display:none}col.c-ln{width:35px}tr.cmt td{padding-left:10px}}
   @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+  .definition-modifier .symbol:hover{cursor:pointer;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px;color:var(--accent)}
+  .definition-hint{color:var(--dim);font-size:11px;margin-left:auto}
+  #definitions{width:min(1100px,94vw);max-width:94vw;height:82vh;max-height:90vh;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--fg);box-shadow:0 24px 90px #0009}
+  #definitions[open]{display:flex;flex-direction:column}
+  #definitions::backdrop{background:#0009}
+  .definition-head{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);flex-shrink:0}
+  #definition-title{font:600 13px/1.5 var(--mono);margin:0;flex:1;overflow-wrap:anywhere}
+  #definition-body{overflow:auto;flex:1;min-height:0}
+  .definition-status{padding:12px 18px;color:var(--dim);font-size:12px;overflow-wrap:anywhere}
+  .definition-match{display:block;text-align:left;width:100%;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:14px 18px;background:transparent}
+  .definition-match:hover,.definition-match:focus-visible{background:var(--bg3)}
+  .definition-match strong,.definition-match code{display:block;overflow-wrap:anywhere}
+  .definition-match code{color:var(--dim);margin-top:6px;font:12px/1.5 var(--mono)}
+  .source-row.target-line td{background:#30415a;box-shadow:inset 0 1px #708dab,inset 0 -1px #708dab}
+  .definition-pages{display:flex;gap:10px;padding:10px 18px}
 </style>
 </head>
 <body>
@@ -937,6 +1126,14 @@ PAGE = r"""<!doctype html>
   <span class="compose-hint"><kbd>⌘ / Ctrl ↵</kbd> save · <kbd>Esc</kbd> cancel</span>
 </nav>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<dialog id="definitions" aria-labelledby="definition-title">
+  <div class="definition-head">
+    <button id="definition-back" title="Go back within definitions">← Back to diff</button>
+    <h2 id="definition-title">Go to definition</h2>
+    <button id="definition-close" aria-label="Close definitions">Close · Esc</button>
+  </div>
+  <div id="definition-body" tabindex="0" aria-live="polite"></div>
+</dialog>
 <script>
 const LANG = {js:'javascript',jsx:'javascript',mjs:'javascript',cjs:'javascript',ts:'typescript',tsx:'typescript',
   py:'python',rb:'ruby',go:'go',rs:'rust',java:'java',kt:'kotlin',scala:'scala',swift:'swift',
@@ -1062,6 +1259,158 @@ function hl(text, lang){
   try { return hljs.highlight(text, {language: lang, ignoreIllegals: true}).value; }
   catch (e) { return esc(text); }
 }
+
+/* ----------------------------------------------- local go-to-definition */
+function linkSymbols(element){
+  // Decorate text nodes after highlighting so spans never corrupt its markup.
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes){
+    if (node.parentElement.closest('.hljs-comment,.hljs-string,.hljs-regexp,.sig')) continue;
+    const fragment = document.createDocumentFragment();
+    let end = 0;
+    for (const match of node.textContent.matchAll(/[\p{L}_$][\p{L}\p{N}_$]*/gu)){
+      fragment.append(node.textContent.slice(end, match.index));
+      const span = document.createElement('span');
+      span.className = 'symbol'; span.textContent = match[0];
+      span.title = 'Ctrl-click or ⌘-click to find definitions';
+      fragment.append(span); end = match.index + match[0].length;
+    }
+    fragment.append(node.textContent.slice(end));
+    node.replaceWith(fragment);
+  }
+}
+function definitionClick(event, context){
+  const symbol = event.target.closest('.symbol');
+  if (!(event.ctrlKey || event.metaKey) || !symbol) return false;
+  event.preventDefault(); event.stopPropagation();
+  lookupDefinition(symbol.textContent, context);
+  return true;
+}
+for (const event of ['keydown', 'keyup', 'pointermove']){
+  document.addEventListener(event, e => document.body.classList.toggle('definition-modifier', e.ctrlKey || e.metaKey));
+}
+window.addEventListener('blur', () => document.body.classList.remove('definition-modifier'));
+// macOS sends a contextmenu event for Control-click instead of a normal click.
+document.addEventListener('contextmenu', e => {
+  const symbol = e.target.closest('.symbol');
+  if (e.ctrlKey && symbol){ e.preventDefault(); }
+});
+
+let definitionView = null, definitionHistory = [], definitionRequest = 0;
+const definitionDialog = $('#definitions');
+function definitionQuery(context){
+  return new URLSearchParams({origin:context.origin, side:context.side, path:context.path});
+}
+function showDefinitionView(view, push = true){
+  if (!definitionDialog.open){
+    definitionHistory = []; definitionView = null;
+    definitionDialog.showModal();
+  }
+  if (push && definitionView){
+    definitionView.scrollTop = $('#definition-body').scrollTop;
+    definitionHistory.push(definitionView);
+  }
+  definitionView = view;
+  $('#definition-back').textContent = definitionHistory.length ? '← Back' : '← Back to diff';
+  $('#definition-title').textContent = view.title;
+  const body = $('#definition-body');
+  body.replaceChildren();
+  const status = document.createElement('div');
+  status.className = 'definition-status'; status.textContent = view.message || '';
+  body.append(status);
+  if (view.kind === 'matches'){
+    for (const match of view.matches){
+      const button = document.createElement('button');
+      button.className = 'definition-match';
+      const label = document.createElement('strong'), code = document.createElement('code');
+      label.textContent = match.path + ':' + match.line; code.textContent = match.text;
+      button.append(label, code);
+      button.onclick = () => openDefinition(match, view.context);
+      body.append(button);
+    }
+  } else if (view.kind === 'source'){
+    const start = view.start ?? Math.max(0, view.line - 41);
+    const end = Math.min(view.lines.length, start + 160);
+    view.start = start;
+    status.textContent = view.revision + ' · Lines ' + (start + 1) + '–' + end + ' of ' + view.lines.length +
+      ' · Ctrl-click / ⌘-click a symbol to follow another definition';
+    const pages = document.createElement('div'); pages.className = 'definition-pages';
+    for (const [label, next, disabled] of [['↑ Earlier lines', Math.max(0, start - 160), start === 0],
+                                         ['↓ Later lines', end, end === view.lines.length]]){
+      const button = document.createElement('button');
+      button.textContent = label; button.disabled = disabled;
+      button.onclick = () => showDefinitionView({...view, start:next, scrollTop:0}, false);
+      pages.append(button);
+    }
+    body.append(pages);
+    const table = document.createElement('table'); table.className = 'diff';
+    table.innerHTML = '<colgroup><col class="c-ln"><col></colgroup>';
+    const tbody = document.createElement('tbody'), lang = langFor(view.path);
+    for (let i = start; i < end; i++){
+      const tr = document.createElement('tr');
+      tr.className = 'source-row' + (i + 1 === view.line ? ' target-line' : '');
+      tr.innerHTML = '<td class="ln">' + (i + 1) + '</td><td class="code">' + hl(view.lines[i], lang) + '</td>';
+      const code = tr.querySelector('.code'); linkSymbols(code);
+      code.onmousedown = e => {
+        if (e.ctrlKey && e.button === 0) definitionClick(e, {...view.context, path:view.path});
+      };
+      code.onclick = e => { if (!e.ctrlKey) definitionClick(e, {...view.context, path:view.path}); };
+      tbody.append(tr);
+    }
+    table.append(tbody); body.append(table);
+  }
+  if (view.scrollTop != null) body.scrollTop = view.scrollTop;
+  else if (view.kind === 'source') body.querySelector('.target-line')?.scrollIntoView({block:'center'});
+  else body.scrollTop = 0;
+}
+async function lookupDefinition(symbol, context){
+  const request = ++definitionRequest;
+  showDefinitionView({kind:'message', title:'Definition of ' + symbol, message:'Finding definitions…'});
+  try {
+    const query = definitionQuery(context); query.set('symbol', symbol);
+    const result = await api('/api/definitions?' + query);
+    if (request !== definitionRequest || !definitionDialog.open) return;
+    if (result.matches.length === 1 && !result.truncated && !result.skipped){
+      await openDefinition(result.matches[0], context, false);
+      return;
+    }
+    const count = result.matches.length;
+    showDefinitionView({kind:'matches', title:'Definition of ' + symbol, context, matches:result.matches,
+      message:(count ? count + ' possible definitions · Choose a location' :
+        'No local definition found. This may be an external dependency or an unsupported declaration.') +
+        ' · ' + result.revision + (result.truncated ? ' · Search limit reached; results are partial.' : '') +
+        (result.skipped ? ' · ' + result.skipped + ' unavailable or oversized files skipped.' : '')}, false);
+  } catch(e){
+    if (request === definitionRequest && definitionDialog.open)
+      showDefinitionView({kind:'message', title:'Definition of ' + symbol, message:'Could not find definitions: ' + e.message}, false);
+  }
+}
+async function openDefinition(match, context, push = true){
+  const request = ++definitionRequest;
+  const title = match.path + ':' + match.line;
+  showDefinitionView({kind:'message', title, message:'Loading source…'}, push);
+  try {
+    const query = definitionQuery(context); query.set('path', match.path);
+    const result = await api('/api/source?' + query);
+    if (request !== definitionRequest || !definitionDialog.open) return;
+    showDefinitionView({kind:'source', title, context, path:match.path, line:match.line,
+      lines:result.lines, revision:result.revision}, false);
+  } catch(e){
+    if (request === definitionRequest && definitionDialog.open)
+      showDefinitionView({kind:'message', title, message:'Could not open source: ' + e.message}, false);
+  }
+}
+$('#definition-back').onclick = () => {
+  ++definitionRequest;
+  if (definitionHistory.length) showDefinitionView(definitionHistory.pop(), false);
+  else definitionDialog.close();
+};
+$('#definition-close').onclick = () => definitionDialog.close();
+definitionDialog.addEventListener('close', () => {
+  ++definitionRequest; definitionView = null; definitionHistory = [];
+});
 
 async function api(url, body){
   const r = await fetch(url, body ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : undefined);
@@ -1227,7 +1576,8 @@ function drawFile(f, rows){
     '<span class="st ' + esc(f.status[0]) + '">' + esc(f.status) + '</span>' +
     (f.adds === null ? '<span>binary</span>' : '<span class="plus">+' + f.adds + '</span><span class="minus">−' + f.dels + '</span>') +
     '<span>' + f.state.comments.filter(x => !x.resolved).length + ' open of ' +
-    f.state.comments.length + ' thread(s)</span></div>';
+    f.state.comments.length + ' thread(s)</span>' +
+    '<span class="definition-hint">Ctrl-click / ⌘-click a symbol → definition</span></div>';
   m.appendChild(head);
 
   const notes = document.createElement('div');
@@ -1263,11 +1613,19 @@ function drawFile(f, rows){
       '<td class="ln">' + (r.new != null ? r.new : '') + '</td>' +
       '<td class="code"><span class="sig">' + sign + '</span> ' + hl(r.text, lang) + '</td>';
     tr.querySelectorAll('.ln').forEach(td => td.onclick = () => toggle(r.k));
-    tr.querySelector('.code').onclick = () => {
+    const code = tr.querySelector('.code');
+    const context = {origin:f.path, path:r.t === 'del' ? (f.old || f.path) : f.path,
+                     side:r.t === 'del' ? 'L' : 'R'};
+    linkSymbols(code);
+    code.onmousedown = e => {
+      if (e.ctrlKey && e.button === 0) definitionClick(e, context);
+    };
+    code.onclick = e => {
+      if (e.ctrlKey || definitionClick(e, context)) return;
       document.querySelectorAll('.current-line').forEach(row => row.classList.remove('current-line'));
       tr.classList.add('current-line');
     };
-    tr.querySelector('.code').ondblclick = () => toggle(r.k);
+    code.ondblclick = e => { if (!e.ctrlKey && !e.metaKey) toggle(r.k); };
     tb.appendChild(tr);
   });
   tbl.appendChild(tb);
@@ -1336,7 +1694,7 @@ function toggle(k){
 
 /* is the user mid-edit? then live polling must not repaint over them */
 function busy(){
-  return !!document.querySelector('.cmt-ed') ||
+  return definitionDialog.open || !!document.querySelector('.cmt-ed') ||
          (document.activeElement && document.activeElement.tagName === 'TEXTAREA');
 }
 
@@ -1812,6 +2170,7 @@ function scrollReview(key){
 }
 
 document.addEventListener('keydown', e => {
+  if (definitionDialog.open) return;
   const t = e.target.tagName;
   if (t === 'TEXTAREA' || t === 'INPUT' || t === 'SELECT' || e.target.isContentEditable ||
       e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || e.isComposing) return;
