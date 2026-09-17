@@ -489,6 +489,30 @@ def find_definitions(ctx, origin, side, symbol, current=None):
 
 # --------------------------------------------------------------------- state
 
+def comment_location(comment):
+    start, end = comment.get("start_line"), comment["line"]
+    return "%s–%s" % (start, end) if start and start != end else end
+
+
+def comment_range(rows, start, end):
+    """Visible, consecutive lines on one diff side, within one hunk."""
+    if not re.fullmatch(r"[LR][1-9]\d*", start or "") or not re.fullmatch(r"[LR][1-9]\d*", end or ""):
+        return []
+    lo, hi = int(start[1:]), int(end[1:])
+    if start[0] != end[0] or lo > hi:
+        return []
+    field = "old" if start[0] == "L" else "new"
+    selected = []
+    for row in rows:
+        if row["t"] == "hunk" and selected:
+            break
+        if row.get("k") and lo <= (row.get(field) or 0) <= hi:
+            selected.append(row)
+    if len(selected) != hi - lo + 1 or any(r[field] != lo + i for i, r in enumerate(selected)):
+        return []
+    return selected
+
+
 class Store:
     """.review/state.json, reloaded on disk change so the CLI and the running
     server can both write it without clobbering each other."""
@@ -599,7 +623,7 @@ class Store:
                     if not text.strip():
                         continue
                     old = prev.get(c.get("id")) or {}
-                    out.append({
+                    item = {
                         "id": c.get("id") or old.get("id") or new_id(),
                         "line": str(c.get("line", old.get("line", ""))),
                         "text": text,
@@ -610,7 +634,17 @@ class Store:
                         "replies": old.get("replies", []),
                         "awaiting": bool(c.get("awaiting", old.get("awaiting", False))),
                         "resolved": bool(c.get("resolved", old.get("resolved", False))),
-                    })
+                    }
+                    start = c.get("start_line", old.get("start_line"))
+                    if start and start != item["line"]:
+                        end = item["line"]
+                        if (not isinstance(start, str) or not re.fullmatch(r"[LR][1-9]\d*", start)
+                                or not re.fullmatch(r"[LR][1-9]\d*", end)
+                                or start[0] != end[0] or int(start[1:]) > int(end[1:])):
+                            raise ValueError("comment range must be ordered and on the same diff side")
+                        item["start_line"] = start
+                        item["range_snippet"] = str(c.get("range_snippet", old.get("range_snippet", "")))
+                    out.append(item)
                 f["comments"] = out
             self._flush()
             return f
@@ -720,11 +754,17 @@ class Handler(BaseHTTPRequestHandler):
         """Remember each comment's line text, once, so it can be re-found."""
         store = self.ctx["store"]
         by_key = {r["k"]: r for r in rows if r.get("k")}
+        by_key.update({"L%d" % r["old"]: r for r in rows if r.get("old")})
         dirty = False
         for c in store.file(path)["comments"]:
             if not c.get("snippet") and c["line"] in by_key:
                 c["snippet"] = by_key[c["line"]].get("text", "")
                 dirty = bool(c["snippet"]) or dirty
+            if c.get("start_line") and not c.get("range_snippet"):
+                selected = comment_range(rows, c["start_line"], c["line"])
+                if selected and (not c.get("snippet") or c["snippet"] == selected[-1]["text"]):
+                    c["range_snippet"] = "\n".join(r["text"] for r in selected)
+                    dirty = True
         if dirty:
             with store.lock:
                 store._flush()
@@ -834,6 +874,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err("not found", 404)
         except KeyError as e:
             return self._err(e, 404)
+        except ValueError as e:
+            return self._err(e)
         except GitError as e:
             return self._err(e, 500)
 
@@ -1032,6 +1074,12 @@ PAGE = r"""<!doctype html>
   .shortcuts kbd{color:var(--accent);min-width:21px;text-align:center;padding:1px 5px}
   .shortcuts .compose-hint{color:var(--dim);font-size:10px;white-space:nowrap}
   tr.code-row.current-line td.code{box-shadow:inset 3px 0 var(--accent)}
+  tr.code-row.range-selected td.code,tr.code-row.range-hover td.code{background:#30415a}
+  tr.code-row.range-selected td.ln[data-line]{background:#3b5270;color:#fff}
+  td.ln[data-line]{touch-action:none;cursor:pointer}
+  .comment-target{font:600 12px/1.5 var(--mono);color:var(--accent);margin-bottom:8px}
+  .range-label{font:11px/1.5 var(--mono);color:var(--accent);padding:1px 6px}
+  .range-label:disabled{cursor:default;opacity:.8}
   main{border:1px solid var(--line);border-radius:14px;background:var(--bg);scrollbar-color:#515b67 transparent}
   .ovw{max-width:1480px;margin:auto;padding:32px}
   .hero{position:relative;display:flex;justify-content:space-between;align-items:center;gap:24px;padding:4px 0 30px}
@@ -1142,9 +1190,10 @@ const LANG = {js:'javascript',jsx:'javascript',mjs:'javascript',cjs:'javascript'
   css:'css',scss:'scss',less:'less',md:'markdown',markdown:'markdown',dockerfile:'dockerfile',
   gradle:'groovy',groovy:'groovy',tf:'hcl',hcl:'hcl',ex:'elixir',exs:'elixir',erl:'erlang',clj:'clojure',dart:'dart',r:'r'};
 
-let FILES = [], META = {}, cur = null, open = {};   // open: rowKey -> true (editor visible)
+let FILES = [], META = {}, cur = null, open = {};   // open: rowKey -> comment draft
 let expanded = {};                                  // resolved threads opened by hand
 let ROWS = [];                                      // current file's diff rows
+let lineSelection = null, lineDrag = null;
 
 const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const $ = s => document.querySelector(s);
@@ -1550,8 +1599,84 @@ function renderList(){
 }
 
 /* -------------------------------------------------------------- main panel */
+const sideKey = (row, side) => row[side === 'L' ? 'old' : 'new'] != null
+  ? side + row[side === 'L' ? 'old' : 'new'] : null;
+const rangeLabel = range => range.start_line && range.start_line !== range.line
+  ? range.start_line + '–' + range.line : range.line;
+
+function commentRange(first, last){
+  if (!first || !last || first[0] !== last[0]) return null;
+  const side = first[0], lo = Math.min(+first.slice(1), +last.slice(1)), hi = Math.max(+first.slice(1), +last.slice(1));
+  const rows = [];
+  for (const row of ROWS){
+    if (row.t === 'hunk' && rows.length) break;
+    const key = sideKey(row, side), number = key && +key.slice(1);
+    if (key && number >= lo && number <= hi) rows.push(row);
+  }
+  if (rows.length !== hi - lo + 1 || rows.some((row, i) => +sideKey(row, side).slice(1) !== lo + i)) return null;
+  return {anchor:first, start_line:side + lo, line:side + hi, rows};
+}
+
+function selectRange(first, last, quiet = false){
+  const range = commentRange(first, last);
+  if (!range){
+    if (!quiet) toast('Select lines on the same side, within one diff hunk.');
+    return false;
+  }
+  lineSelection = range;
+  const keys = new Set(range.rows.map(r => r.k));
+  document.querySelectorAll('#main tr.code-row').forEach(tr => {
+    tr.classList.toggle('range-selected', keys.has(tr.dataset.k));
+    tr.classList.toggle('current-line', tr.dataset.k === range.rows.at(-1).k);
+  });
+  return true;
+}
+
+function canSelectRange(){
+  const editor = document.querySelector('.cmt-ed:not([data-draft]) textarea');
+  if (!editor) return true;
+  editor.focus(); toast('Save or cancel this edit before starting another comment.');
+  return false;
+}
+
+function openRangeEditor(){
+  if (!lineSelection || !canSelectRange()) return;
+  const previous = Object.values(open).find(Boolean);
+  const k = lineSelection.rows.at(-1).k;
+  open = {[k]: {...lineSelection, text:previous?.text || ''}};
+  paintComments(fileOf(cur));
+  document.querySelector('tr.cmt[data-k="' + CSS.escape(k) + '"] textarea')?.focus();
+}
+
+function startLineDrag(event, key){
+  if (event.button !== 0 || event.ctrlKey || event.metaKey || !canSelectRange()) return;
+  event.preventDefault();
+  const first = event.shiftKey && lineSelection ? lineSelection.anchor : key;
+  if (!selectRange(first, key)) return;
+  lineDrag = {first, pointerId:event.pointerId};
+  event.currentTarget.setPointerCapture(event.pointerId);
+}
+document.addEventListener('pointermove', event => {
+  if (!lineDrag || event.pointerId !== lineDrag.pointerId) return;
+  const panel = $('#main').getBoundingClientRect();
+  if (event.clientY > panel.bottom - 24) $('#main').scrollBy({top:32, behavior:'instant'});
+  else if (event.clientY < Math.max(panel.top, $('.fhead').getBoundingClientRect().bottom) + 24)
+    $('#main').scrollBy({top:-32, behavior:'instant'});
+  const tr = document.elementFromPoint(event.clientX, event.clientY)?.closest('#main tr.code-row');
+  if (!tr) return;
+  const row = ROWS[Number(tr.dataset.i)], key = sideKey(row, lineDrag.first[0]);
+  if (key) selectRange(lineDrag.first, key, true);
+});
+document.addEventListener('pointerup', event => {
+  if (!lineDrag || event.pointerId !== lineDrag.pointerId) return;
+  lineDrag = null;
+  openRangeEditor();
+});
+document.addEventListener('pointercancel', () => { lineDrag = null; });
+window.addEventListener('blur', () => { lineDrag = null; });
+
 async function select(path){
-  cur = path; open = {}; expanded = {};
+  cur = path; open = {}; expanded = {}; lineSelection = null; lineDrag = null;
   if (location.hash !== '#f=' + path) history.replaceState(null, '', '#f=' + path);
   renderList();
   const f = fileOf(path);
@@ -1577,6 +1702,7 @@ function drawFile(f, rows){
     (f.adds === null ? '<span>binary</span>' : '<span class="plus">+' + f.adds + '</span><span class="minus">−' + f.dels + '</span>') +
     '<span>' + f.state.comments.filter(x => !x.resolved).length + ' open of ' +
     f.state.comments.length + ' thread(s)</span>' +
+    '<span class="definition-hint">Drag line numbers or Shift-click to comment on a range</span>' +
     '<span class="definition-hint">Ctrl-click / ⌘-click a symbol → definition</span></div>';
   m.appendChild(head);
 
@@ -1612,7 +1738,13 @@ function drawFile(f, rows){
       '<td class="ln">' + (r.old != null ? r.old : '') + '</td>' +
       '<td class="ln">' + (r.new != null ? r.new : '') + '</td>' +
       '<td class="code"><span class="sig">' + sign + '</span> ' + hl(r.text, lang) + '</td>';
-    tr.querySelectorAll('.ln').forEach(td => td.onclick = () => toggle(r.k));
+    tr.querySelectorAll('.ln').forEach((td, column) => {
+      const key = sideKey(r, column === 0 ? 'L' : 'R');
+      if (!key) return;
+      td.dataset.line = key;
+      td.title = 'Comment on ' + key + ' · Drag or Shift-click to select multiple lines';
+      td.onpointerdown = e => startLineDrag(e, key);
+    });
     const code = tr.querySelector('.code');
     const context = {origin:f.path, path:r.t === 'del' ? (f.old || f.path) : f.path,
                      side:r.t === 'del' ? 'L' : 'R'};
@@ -1622,8 +1754,9 @@ function drawFile(f, rows){
     };
     code.onclick = e => {
       if (e.ctrlKey || definitionClick(e, context)) return;
-      document.querySelectorAll('.current-line').forEach(row => row.classList.remove('current-line'));
-      tr.classList.add('current-line');
+      if (!canSelectRange()) return;
+      if (selectRange(e.shiftKey && lineSelection ? lineSelection.anchor : r.k, r.k) && Object.values(open).some(Boolean))
+        openRangeEditor();
     };
     code.ondblclick = e => { if (!e.ctrlKey && !e.metaKey) toggle(r.k); };
     tb.appendChild(tr);
@@ -1677,24 +1810,19 @@ function addComment(){
   const rows = [...document.querySelectorAll('tr.code-row')];
   const row = selected && visible(selected) ? selected : rows.find(visible) || rows[0];
   if (!row){ $('#nt').focus(); toast('No code lines in this file. Add your thoughts in File notes.'); return; }
-  document.querySelectorAll('.current-line').forEach(r => r.classList.remove('current-line'));
-  row.classList.add('current-line');
-  toggle(row.dataset.k);
+  if (row !== selected || !lineSelection) selectRange(row.dataset.k, row.dataset.k);
+  openRangeEditor();
 }
 
 /* --------------------------------------------------------------- comments */
 function toggle(k){
-  open[k] = !open[k];
-  paintComments(fileOf(cur));
-  if (open[k]){
-    const ta = document.querySelector('tr.cmt[data-k="' + CSS.escape(k) + '"] textarea');
-    if (ta) ta.focus();
-  }
+  if (!canSelectRange()) return;
+  if (selectRange(k, k)) openRangeEditor();
 }
 
 /* is the user mid-edit? then live polling must not repaint over them */
 function busy(){
-  return definitionDialog.open || !!document.querySelector('.cmt-ed') ||
+  return !!lineDrag || definitionDialog.open || !!document.querySelector('.cmt-ed') ||
          (document.activeElement && document.activeElement.tagName === 'TEXTAREA');
 }
 
@@ -1722,16 +1850,39 @@ function msg(author, text, ts, tools, isReply){
    comment onto unrelated code. Content wins; if the text is gone, so is the
    anchor, and the thread goes to the orphan block instead of somewhere wrong. */
 function anchor(c, byKey){
+  if (c.start_line && c.start_line !== c.line){
+    const length = +c.line.slice(1) - +c.start_line.slice(1) + 1;
+    const matches = range => range && (!c.range_snippet ||
+      range.rows.map(r => r.text).join('\n') === c.range_snippet);
+    let range = commentRange(c.start_line, c.line);
+    if (!matches(range)){
+      range = null;
+      if (c.range_snippet){
+        let distance = Infinity;
+        for (const row of ROWS){
+          const first = sideKey(row, c.line[0]);
+          if (!first || row.text !== c.range_snippet.split('\n')[0]) continue;
+          const candidate = commentRange(first, first[0] + (+first.slice(1) + length - 1));
+          const d = Math.abs(+first.slice(1) - +c.start_line.slice(1));
+          if (matches(candidate) && d < distance){ range = candidate; distance = d; }
+        }
+      }
+    }
+    if (!range) return null;
+    return {key:range.rows.at(-1).k, start:range.start_line, end:range.line,
+            keys:range.rows.map(r => r.k), from:range.line !== c.line ? rangeLabel(c) : null};
+  }
   const snip = c.snippet || '';
   const row = byKey[c.line];
-  if (row && (!snip || row.text === snip)) return {key: c.line};
+  if (row && (!snip || row.text === snip)) return {key: row.k};
   if (snip.trim().length >= 3){                 // shorter is too generic to chase
     const want = Number(c.line.slice(1)) || 0;
     let best = null;
     for (const r of ROWS){
       if (!r.k || r.text !== snip) continue;
-      if (r.k[0] !== c.line[0] && !(c.line[0] === 'R' && r.t === 'ctx')) continue;
-      const d = Math.abs((Number(r.k.slice(1)) || 0) - want);
+      const key = sideKey(r, c.line[0]);
+      if (!key) continue;
+      const d = Math.abs((Number(key.slice(1)) || 0) - want);
       if (!best || d < best.d) best = {key: r.k, d: d};
     }
     if (best) return {key: best.key, from: c.line};
@@ -1741,14 +1892,18 @@ function anchor(c, byKey){
 
 function paintComments(f){
   document.querySelectorAll('tr.cmt').forEach(tr => tr.remove());
+  document.querySelectorAll('.range-hover').forEach(row => row.classList.remove('range-hover'));
   const byKey = {};
-  for (const r of ROWS) if (r.k) byKey[r.k] = r;
+  for (const r of ROWS) if (r.k){
+    byKey[r.k] = r;
+    if (r.old != null) byKey['L' + r.old] = r;
+  }
 
   const byLine = {}, orphans = [];
   f.state.comments.forEach((c, idx) => {
     const a = anchor(c, byKey);
     if (!a){ orphans.push({c, idx}); return; }
-    (byLine[a.key] = byLine[a.key] || []).push({c, idx, from: a.from});
+    (byLine[a.key] = byLine[a.key] || []).push({c, idx, location:a});
   });
 
   const ob = $('#orph');
@@ -1763,10 +1918,11 @@ function paintComments(f){
       ob.appendChild(h);
       for (const {c, idx} of orphans){
         const t = thread(f, c.line, c, idx, ob);
-        const why = byKey[c.line] ? 'line ' + c.line + ' now holds different code'
+        const why = c.start_line ? 'the selected range changed or is no longer fully visible in this diff'
+                  : byKey[c.line] ? 'line ' + c.line + ' now holds different code'
                                   : 'line ' + c.line + ' is not in this diff';
         t.querySelector('.who b').insertAdjacentHTML('afterend',
-          '<span class="moved" title="' + esc(why) + '">was ' + esc(c.line) + '</span>');
+          '<span class="moved" title="' + esc(why) + '">was ' + esc(rangeLabel(c)) + '</span>');
         ob.appendChild(t);
       }
     }
@@ -1786,10 +1942,10 @@ function paintComments(f){
     td.colSpan = 3;
     row.appendChild(td);
 
-    for (const {c, idx, from} of items){
-      const t = thread(f, k, c, idx, td);
-      if (from) t.querySelector('.who b').insertAdjacentHTML('afterend',
-        '<span class="moved" title="the line moved; matched on its text">moved from ' + esc(from) + '</span>');
+    for (const {c, idx, location} of items){
+      const t = thread(f, k, c, idx, td, location);
+      if (location.from) t.querySelector('.who b').insertAdjacentHTML('afterend',
+        '<span class="moved" title="the code moved; matched on its text">moved from ' + esc(location.from) + '</span>');
       td.appendChild(t);
     }
     if (open[k]) editor(f, k, td, null, '', -1);
@@ -1797,7 +1953,7 @@ function paintComments(f){
   });
 }
 
-function thread(f, k, c, idx, td){
+function thread(f, k, c, idx, td, location){
   const wrap = document.createElement('div');
   const shut = c.resolved && !expanded[c.id];
   wrap.className = 'thr' + (c.resolved ? ' done' : '');
@@ -1816,6 +1972,25 @@ function thread(f, k, c, idx, td){
     ? [['reopen', () => setResolved(false)]]
     : [['edit', () => editor(f, k, td, head, c.text, idx)], ['delete', del]];
   const head = msg(c.author || 'you', c.text, c.ts, tools, false);
+  if (c.start_line){
+    const label = document.createElement('button');
+    label.className = 'range-label';
+    label.textContent = location ? rangeLabel({start_line:location.start, line:location.end}) : rangeLabel(c);
+    label.disabled = !location;
+    label.title = 'Highlight the commented lines';
+    label.onclick = () => {
+      if (!canSelectRange()) return;
+      selectRange(location.start, location.end);
+      document.querySelector('tr.code-row[data-k="' + CSS.escape(location.keys[0]) + '"]')?.scrollIntoView({block:'center'});
+    };
+    head.querySelector('.who b').after(label);
+    if (location){
+      const keys = new Set(location.keys);
+      wrap.onmouseenter = () => document.querySelectorAll('#main tr.code-row').forEach(row =>
+        row.classList.toggle('range-hover', keys.has(row.dataset.k)));
+      wrap.onmouseleave = () => document.querySelectorAll('.range-hover').forEach(row => row.classList.remove('range-hover'));
+    }
+  }
   if (c.resolved){
     head.querySelector('.who b').insertAdjacentHTML('afterend',
       '<span class="ok">\u2713 resolved</span>');
@@ -1909,19 +2084,33 @@ function box(placeholder, text, onSave, onCancel, why){
 /* new / edited top-level comment */
 function editor(f, k, td, replace, text, idx){
   const done = () => { open[k] = false; paintComments(f); };
-  const b = box('Comment on ' + k + '\u2026', text, v => {
+  const range = idx >= 0 ? f.state.comments[idx] : open[k];
+  const label = rangeLabel(range);
+  const b = box('Comment on ' + label + '\u2026', idx < 0 ? range.text : text, v => {
     const val = v.trim();
     const arr = f.state.comments.slice();
     if (idx >= 0){
       if (val) arr[idx] = Object.assign({}, arr[idx], {text: val}); else arr.splice(idx, 1);
     } else if (val){
-      const row = ROWS.find(r => r.k === k);
-      arr.push({line: k, text: val, author: 'you', awaiting: !!META.agent_replies,
-                snippet: row ? row.text : ''});
+      const rows = commentRange(range.start_line || range.line, range.line).rows;
+      const comment = {line:range.line, text:val, author:'you', awaiting:!!META.agent_replies,
+                       snippet:rows.at(-1).text};
+      if (range.start_line !== range.line){
+        comment.start_line = range.start_line;
+        comment.range_snippet = rows.map(r => r.text).join('\n');
+      }
+      arr.push(comment);
     } else return done();
     open[k] = false;
     save(f.path, {comments: arr}).then(() => paintComments(f));
   }, done, META.agent_replies && idx < 0 ? '\u2726 will be flagged for an agent reply' : '');
+  const heading = document.createElement('div');
+  heading.className = 'comment-target'; heading.textContent = 'Comment on ' + label;
+  b.prepend(heading);
+  if (idx < 0){
+    b.dataset.draft = 'true';
+    b.querySelector('textarea').oninput = e => { range.text = e.target.value; };
+  }
   if (replace) replace.replaceWith(b); else td.appendChild(b);
 }
 
@@ -2238,20 +2427,22 @@ $('#refresh').onclick = async () => {
 
 # ------------------------------------------------- agent-facing subcommands
 
-def thread_context(rows, line, n):
-    """The diff lines around a commented line, with the target marked."""
-    i = next((k for k, r in enumerate(rows) if r.get("k") == line), None)
-    if i is None:
+def thread_context(rows, line, n, start_line=None):
+    """The diff around a comment, with every line in its range marked."""
+    selected = comment_range(rows, start_line or line, line)
+    if not selected:
         return []
+    keys = {r["k"] for r in selected}
+    i, end = rows.index(selected[0]), rows.index(selected[-1])
     hunk = next((rows[k]["text"] for k in range(i, -1, -1)
                  if rows[k]["t"] == "hunk"), None)
     sign = {"add": "+", "del": "-", "ctx": " "}
     out = [hunk] if hunk else []
-    for k in range(max(0, i - n), min(len(rows), i + n + 1)):
+    for k in range(max(0, i - n), min(len(rows), end + n + 1)):
         r = rows[k]
         if r["t"] == "hunk":
             continue
-        out.append("%s%s%s" % (">>> " if k == i else "    ",
+        out.append("%s%s%s" % (">>> " if r.get("k") in keys else "    ",
                                sign.get(r["t"], " "), r.get("text", "")))
     return out
 
@@ -2299,13 +2490,14 @@ def cmd_pending(argv):
                 rows_cache[path] = []
         for c in wanted:
             out.append({"path": path, "id": c["id"], "line": c["line"],
+                        "start_line": c.get("start_line", c["line"]),
                         "side": "new" if c["line"].startswith("R") else "old",
                         "lineno": c["line"][1:], "author": c["author"],
                         "comment": c["text"], "replies": c["replies"],
                         "resolved": c.get("resolved", False),
                         "file_notes": f["notes"], "reviewed": f["reviewed"],
                         "context": thread_context(rows_cache[path], c["line"],
-                                                  a.context)})
+                                                  a.context, c.get("start_line"))})
     json.dump(out, sys.stdout, indent=2)
     sys.stdout.write("\n")
 
@@ -2381,7 +2573,6 @@ def cmd_todo(argv):
                 rows = file_diff(root, e)
             except GitError:
                 rows = []
-        keys = {r["k"] for r in rows if r.get("k")}
 
         out.append("")
         out.append("%s%s" % (path, "   [not in the current diff]" if (e or {}).get("stale") else ""))
@@ -2395,14 +2586,14 @@ def cmd_todo(argv):
                 flagged += 1
             if c.get("resolved"):
                 marks.append("resolved")
-            if c["line"] not in keys:
-                marks.append("line no longer in the diff")
+            if not comment_range(rows, c.get("start_line", c["line"]), c["line"]):
+                marks.append("range no longer in the diff" if c.get("start_line") else "line no longer in the diff")
             out.append("  [%s] %s  by %s%s" % (
-                c["id"], c["line"], c.get("author", "you"),
+                c["id"], comment_location(c), c.get("author", "you"),
                 ("  <" + ", ".join(marks) + ">") if marks else ""))
             out.append(wrap(c["text"], "      "))
             if a.context and rows:
-                for ln in thread_context(rows, c["line"], a.context):
+                for ln in thread_context(rows, c["line"], a.context, c.get("start_line")):
                     out.append("      | " + ln)
             for r in c["replies"]:
                 out.append(wrap("-> %s: %s" % (r["author"], r["text"]), "      "))

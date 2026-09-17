@@ -62,6 +62,11 @@ and uncommitted changes together.
   charcoal-and-slate interface adapts to smaller windows and respects reduced motion.
 - **Click a line number** (or double-click a line) to comment on it. Add file-level
   thoughts in the **File notes** box — both save as you type.
+- **Comment on multiple lines** by dragging across line numbers, or clicking the
+  first line number and **Shift-clicking** the last. The selected range is highlighted
+  and the comment opens below its last line. You can extend the range while writing
+  without losing your draft. Select lines on the same old/new side within one diff
+  hunk. A saved comment shows its range; click that label to highlight the lines again.
 - **Ctrl-click a symbol** (or **⌘-click on Mac**) to jump to its definition in a
   source preview, including files outside the diff. Follow more symbols from the
   preview, use **Back** to retrace your jumps, and **Esc** to return to your review
@@ -214,6 +219,13 @@ results and skipped files are indicated in the preview.
 `line` anchors are `R<n>` for the new side, `L<n>` for the old side. `snippet` is the
 text of the anchored line, used to re-find it when the diff changes. `awaiting` means
 "flagged for an agent reply".
+
+For a multiline comment, `line` is the last selected line and `start_line` is the
+first (for example, `"start_line":"R10", "line":"R14"`). `range_snippet` stores
+the selected lines joined by newlines. The whole range must still match to move a
+thread after an edit; otherwise it stays visible in the orphan block. Existing
+single-line comments continue to work. Both `todo` and `pending` include the range,
+and their context output marks every selected line.
 
 State written by an earlier version is migrated in place on the next start — comments
 gain a stable `id`, `author`, `replies`, `awaiting` and `resolved`, and everything

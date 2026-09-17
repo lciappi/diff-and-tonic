@@ -1,7 +1,11 @@
-"""Definition navigation regressions. Run: python3 -m unittest -v"""
+"""Review regressions. Run: python3 -m unittest -v"""
 
 import json
+import contextlib
+import io
 from pathlib import Path
+import shutil
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -10,6 +14,78 @@ import urllib.request
 from http.server import ThreadingHTTPServer
 
 import review
+
+
+class CommentRangeTests(unittest.TestCase):
+    def setUp(self):
+        self.rows = [
+            {'t': 'hunk', 'text': '@@ -10,3 +10,3 @@'},
+            {'t': 'ctx', 'k': 'R10', 'old': 10, 'new': 10, 'text': 'first'},
+            {'t': 'del', 'k': 'L11', 'old': 11, 'text': 'old middle'},
+            {'t': 'add', 'k': 'R11', 'new': 11, 'text': 'new middle'},
+            {'t': 'ctx', 'k': 'R12', 'old': 12, 'new': 12, 'text': 'last'},
+            {'t': 'hunk', 'text': '@@ -20 +20 @@'},
+            {'t': 'ctx', 'k': 'R20', 'old': 20, 'new': 20, 'text': 'elsewhere'},
+        ]
+
+    def test_ranges_and_context_on_both_sides(self):
+        for side, middle in [('L', 'old middle'), ('R', 'new middle')]:
+            with self.subTest(side=side):
+                selected = review.comment_range(self.rows, side + '10', side + '12')
+                self.assertEqual([r['text'] for r in selected], ['first', middle, 'last'])
+                context = review.thread_context(self.rows, side + '12', 0, side + '10')
+                self.assertEqual(len([line for line in context if line.startswith('>>> ')]), 3)
+                self.assertIn(middle, '\n'.join(line for line in context if line.startswith('>>> ')))
+        self.assertEqual(review.comment_range(self.rows, 'R10', 'R20'), [])
+        self.assertEqual(review.comment_range(self.rows, 'L10', 'R12'), [])
+        self.assertEqual(review.comment_range(self.rows, 'R12', 'R10'), [])
+        self.assertEqual(len(review.comment_range(self.rows, 'L12', 'L12')), 1)
+
+    def test_range_persistence_legacy_edits_and_replies(self):
+        with tempfile.TemporaryDirectory() as root:
+            store = review.Store(root)
+            comment = {'line': 'R12', 'start_line': 'R10', 'text': 'Review this block',
+                       'snippet': 'last', 'range_snippet': 'first\nnew middle\nlast'}
+            state = store.patch('a.py', {'comments': [comment, {'line': 'L11', 'text': 'Single line'}]})
+            cid = state['comments'][0]['id']
+            store.add_reply('a.py', cid, 'Acknowledged')
+            # An older client editing the text must not discard range metadata.
+            store.patch('a.py', {'comments': [{'id': cid, 'text': 'Edited'}]})
+            saved = review.Store(root).file('a.py')['comments'][0]
+            self.assertEqual(saved['start_line'], 'R10')
+            self.assertEqual(saved['line'], 'R12')
+            self.assertEqual(saved['range_snippet'], comment['range_snippet'])
+            self.assertEqual(saved['replies'][0]['text'], 'Acknowledged')
+            self.assertEqual(review.comment_location(saved), 'R10–R12')
+            for start in ('L10', 'R13', 'R0', 'bad'):
+                with self.subTest(start=start), self.assertRaises(ValueError):
+                    store.patch('a.py', {'comments': [dict(comment, start_line=start)]})
+            self.assertEqual(store.file('a.py')['comments'][0]['text'], 'Edited')
+
+    @unittest.skipUnless(shutil.which('node'), 'Node is needed to test browser anchoring')
+    def test_browser_range_selection_and_reanchoring(self):
+        # Exercise the exact pure functions embedded in the delivered page.
+        helpers = review.PAGE.split('const sideKey = ', 1)[1].split('function selectRange(', 1)[0]
+        anchor = review.PAGE.split('function anchor(c, byKey){', 1)[1].split('function paintComments(', 1)[0]
+        script = ('const assert = require("node:assert/strict");\nlet ROWS = ' + json.dumps(self.rows) + ';\n'
+                  + 'const sideKey = ' + helpers + '\nfunction anchor(c, byKey){' + anchor + r'''
+const comment = {start_line:'L10', line:'L12', snippet:'last', range_snippet:'first\nold middle\nlast'};
+assert.deepEqual(commentRange('R12', 'R10').rows.map(r => r.k), ['R10','R11','R12']);
+assert.equal(commentRange('R10', 'R20'), null);
+assert.equal(commentRange('L10', 'R12'), null);
+assert.equal(anchor(comment, {}).key, 'R12');
+ROWS = ROWS.map(r => ({...r, ...(r.old ? {old:r.old + 5} : {}), ...(r.new ? {new:r.new + 5} : {}),
+                     ...(r.k ? {k:r.k[0] + (+r.k.slice(1) + 5)} : {})}));
+const moved = anchor(comment, {});
+assert.equal(moved.start, 'L15');
+assert.equal(moved.end, 'L17');
+assert.equal(moved.from, 'L10–L12');
+assert.equal(anchor({line:'L17', snippet:'last'}, {'L17':ROWS[4]}).key, 'R17');
+ROWS[2].text = 'changed inside the selected range';
+assert.equal(anchor(comment, {}), null);
+''')
+        result = subprocess.run([shutil.which('node'), '-e', script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
 
 class DefinitionSyntaxTests(unittest.TestCase):
@@ -170,6 +246,23 @@ class RepositoryNavigationTests(unittest.TestCase):
         self.assertEqual(error.exception.code, 400)
         error.exception.close()
 
+    def test_cli_reports_the_whole_comment_range(self):
+        self.write('caller.py', 'first = 1\nsecond = 2\nthird = 3\nfourth = 4\n')
+        store = review.Store(str(self.repo))
+        store.meta(base=self.base, head=self.head, range=self.base + '..' + self.head, worktree=True)
+        store.patch('caller.py', {'comments': [{'start_line': 'R2', 'line': 'R4',
+                    'snippet': 'fourth = 4', 'range_snippet': 'second = 2\nthird = 3\nfourth = 4',
+                    'text': 'Consider these three lines'}]})
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            review.cmd_pending(['--repo', str(self.repo), '--all', '--context', '0'])
+        comment = json.loads(output.getvalue())[0]
+        self.assertEqual((comment['start_line'], comment['line']), ('R2', 'R4'))
+        self.assertEqual(len([line for line in comment['context'] if line.startswith('>>> ')]), 3)
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            review.cmd_todo(['--repo', str(self.repo)])
+        self.assertIn('R2–R4', output.getvalue())
 
 
 if __name__ == '__main__':
