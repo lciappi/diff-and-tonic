@@ -7,7 +7,7 @@
      ╚═════╝ ╚═╝╚═╝     ╚═╝          |_______|
              &  T O N I C             '-----'
 ```
-
+Now includes intellisense :P
 <h1 align="center">diff &amp; tonic</h1>
 
 <p align="center">
