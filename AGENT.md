@@ -33,6 +33,7 @@ How to read it:
 |---|---|
 | `[b1f07a24]` | the comment id — pass it to `reply` / `resolve` |
 | `R219` / `L48` | anchor: `R` = line 219 of the new side, `L` = old side |
+| `R219–R224` / `L48–L52` | inclusive multiline range on one side; address the whole selection |
 | `by …` | who wrote it (see the table below) |
 | `-> author: …` | replies already on the thread; don't repeat what's been said |
 | `<FLAGGED-FOR-YOU>` | the human explicitly asked an agent to answer this one — highest priority |

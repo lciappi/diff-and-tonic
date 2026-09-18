@@ -62,6 +62,16 @@ and uncommitted changes together.
   charcoal-and-slate interface adapts to smaller windows and respects reduced motion.
 - **Click a line number** (or double-click a line) to comment on it. Add file-level
   thoughts in the **File notes** box — both save as you type.
+- **Comment on multiple lines** by dragging across line numbers, or clicking the
+  first line number and **Shift-clicking** the last. The selected range is highlighted
+  and the comment opens below its last line. You can extend the range while writing
+  without losing your draft. Select lines on the same old/new side within one diff
+  hunk. A saved comment shows its range; click that label to highlight the lines again.
+- **Ctrl-click a symbol** (or **⌘-click on Mac**) to jump to its definition in a
+  source preview, including files outside the diff. Follow more symbols from the
+  preview, use **Back** to retrace your jumps, and **Esc** to return to your review
+  with your scroll position and comment draft preserved. If several definitions
+  share a name, choose the location you want.
 - **Resolve** a thread when you're done with it. It stays visible, dimmed with a
   `✓ resolved` chip, and stops counting as open.
 
@@ -164,6 +174,26 @@ because of that.
 Snippets are backfilled the first time a file is opened, so older reviews pick this up
 automatically.
 
+## Definition navigation
+
+Definition lookup runs locally using Git and Python's standard library. Deleted
+lines search the old revision; other lines search the new side of that file's
+comparison, including working-tree content when that comparison includes it.
+Merge-base comparisons use the common ancestor for the old side. Untracked source
+files are included for working-tree lookups unless `--no-untracked` is set.
+
+Python declarations use syntax-tree parsing. Common function, method, type, and
+variable declarations in Java, JavaScript/TypeScript, Go, Rust, Kotlin, C/C++, and
+other supported source files use declaration patterns. This is a name-based lookup,
+so it can show multiple candidates and does not resolve types, overloads, generated
+symbols, or external dependencies like a language server. Comments and strings are
+excluded from declaration matching. Unusual syntax may not be recognized.
+
+The preview highlights the definition and shows surrounding source, with **Earlier
+lines** / **Later lines** for browsing the file. Source files are limited to 1 MiB;
+lookup checks up to 200 matching files and returns up to 100 definitions. Partial
+results and skipped files are indicated in the preview.
+
 ## State file
 
 ```json
@@ -190,6 +220,13 @@ automatically.
 text of the anchored line, used to re-find it when the diff changes. `awaiting` means
 "flagged for an agent reply".
 
+For a multiline comment, `line` is the last selected line and `start_line` is the
+first (for example, `"start_line":"R10", "line":"R14"`). `range_snippet` stores
+the selected lines joined by newlines. The whole range must still match to move a
+thread after an edit; otherwise it stays visible in the orphan block. Existing
+single-line comments continue to work. Both `todo` and `pending` include the range,
+and their context output marks every selected line.
+
 State written by an earlier version is migrated in place on the next start — comments
 gain a stable `id`, `author`, `replies`, `awaiting` and `resolved`, and everything
 already recorded is preserved. Ids are written to disk rather than invented per load,
@@ -202,6 +239,11 @@ so replies stay attached to the right comment.
 `POST /api/reply {path,id,text,author}`, `POST /api/reply/edit {path,id,index,text}`
 (empty text deletes), `POST /api/ask {path,id,on}`, `POST /api/resolve {path,id,on}`,
 `POST /api/option {agent_replies}`, `POST /api/refresh`.
+
+`GET /api/definitions?origin=…&side=L|R&symbol=…&path=…` finds definitions (`path`
+optionally prioritizes the current source file). `GET /api/source?origin=…&side=L|R&path=…`
+returns source lines. `origin` is the changed file whose comparison determines the
+revision; `path` can also refer to a file outside the diff.
 
 Comment arrays are replaced wholesale by `/api/file`; replies are keyed by comment
 `id` and only change through the reply endpoints, so editing a comment never drops its

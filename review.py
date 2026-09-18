@@ -26,6 +26,7 @@ State lives in <repo>/.review/state.json. Nothing leaves your machine.
 """
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -327,7 +328,190 @@ def file_diff(repo, entry):
     return rows
 
 
+# -------------------------------------------------------- definition lookup
+
+SOURCE_EXTENSIONS = ("py", "pyi", "js", "jsx", "mjs", "cjs", "ts", "tsx", "java",
+                     "kt", "kts", "scala", "go", "rs", "c", "h", "cc", "cpp",
+                     "hpp", "cs", "swift", "rb", "php", "groovy", "dart")
+MAX_SOURCE_BYTES = 1024 * 1024
+
+
+def source_revision(ctx, origin, side):
+    """Use the clicked diff's side, including merge bases and dirty fallbacks."""
+    if side not in ("L", "R"):
+        raise ValueError("side must be L or R")
+    entry = next((e for e in ctx["files"] if e["path"] == origin), None)
+    if entry is None:
+        raise ValueError("unknown origin file")
+    spec = entry.get("dspec")
+    if not spec:
+        ref = None if side == "R" and ctx["worktree"] else ctx["head" if side == "R" else "base"]
+    elif "..." in spec:
+        base, head = spec.split("...", 1)
+        ref = git(ctx["root"], "merge-base", base, head).strip() if side == "L" else head
+    elif ".." in spec:
+        base, head = spec.split("..", 1)
+        ref = base if side == "L" else head
+    else:
+        ref = spec if side == "L" else None
+    return git(ctx["root"], "rev-parse", ref + "^{commit}").strip() if ref else None
+
+
+def source_text(repo, path, revision, untracked=True):
+    """Only expose regular repository files; never follow worktree symlinks."""
+    if not path or path.startswith("/") or any(p in ("", ".", "..") for p in path.split("/")):
+        raise ValueError("invalid source path")
+    literal = ":(literal)" + path
+    if revision:
+        records = split_z(git(repo, "ls-tree", "-z", revision, "--", literal))
+        record = next((r for r in records if r.split("\t", 1)[-1] == path), None)
+        if not record or record.split()[0] not in ("100644", "100755"):
+            raise ValueError("source is not a regular repository file")
+        oid = record.split()[2]
+        if int(git(repo, "cat-file", "-s", oid)) > MAX_SOURCE_BYTES:
+            raise ValueError("source file exceeds the 1 MiB preview limit")
+        text = git(repo, "cat-file", "blob", oid)
+    else:
+        args = ["ls-files", "-z", "--cached"]
+        if untracked:
+            args += ["--others", "--exclude-standard"]
+        if path not in split_z(git(repo, *args, "--", literal)):
+            raise ValueError("source is not a repository file")
+        full = repo
+        for part in path.split("/"):
+            full = os.path.join(full, part)
+            if os.path.islink(full):
+                raise ValueError("symlink source files are not supported")
+        if not os.path.isfile(full):
+            raise ValueError("source is not a regular repository file")
+        try:
+            with open(full, "rb") as f:
+                data = f.read(MAX_SOURCE_BYTES + 1)
+        except OSError as e:
+            raise ValueError("source file is unavailable") from e
+        if len(data) > MAX_SOURCE_BYTES:
+            raise ValueError("source file exceeds the 1 MiB preview limit")
+        text = data.decode("utf-8", errors="replace")
+    if "\0" in text:
+        raise ValueError("binary source files are not supported")
+    return text
+
+
+def definition_lines(text, path, symbol):
+    """Python syntax trees; conservative declaration patterns for other languages.
+
+    This is a local lookup, not type or overload resolution. Keep all candidates
+    so the reviewer can choose when multiple declarations share a name.
+    """
+    ext = path.rsplit(".", 1)[-1].lower()
+    if ext in ("py", "pyi"):
+        try:
+            tree = ast.parse(text)
+        except (SyntaxError, ValueError, RecursionError):
+            pass  # incomplete working-tree code can still have useful declarations
+        else:
+            lines = set()
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == symbol:
+                    lines.add(node.lineno)
+                elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                    targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                    for target in targets:
+                        for name in ast.walk(target):
+                            if isinstance(name, ast.Name) and isinstance(name.ctx, ast.Store) and name.id == symbol:
+                                lines.add(name.lineno)
+            return sorted(lines)
+    # Mask comments and quoted strings without changing offsets or line numbers.
+    quotes = r'''/\*[\s\S]*?\*/|//[^\n]*|"""[\s\S]*?"""|''' + "'''[\\s\\S]*?'''" + r'''|"(?:\\[\s\S]|[^"\\])*"|'(?:\\[\s\S]|[^'\\])*'|`(?:\\[\s\S]|[^`\\])*`'''
+    if ext in ("py", "pyi", "rb", "php"):
+        quotes += r"|\#[^\n]*"
+    clean = re.sub(quotes, lambda m: re.sub(r"[^\n]", " ", m.group()), text)
+    if ext == "java":
+        clean = re.sub(r"@(?!interface\b)[\w.]+(?:\([^()\n]*\))?",
+                       lambda m: " " * len(m.group()), clean)
+    name = r"(?<![\w$])" + re.escape(symbol) + r"(?![\w$])"
+    patterns = [
+        r"\b(?:class|interface|enum|struct|trait|type|record|object|namespace|def|fun|fn|function)\s+(?:\*\s*)?(?P<name>" + name + r")",
+        r"\bfunc\s+(?:\([^\n]*\)\s*)?(?P<name>" + name + r")\s*(?:\[|\()",
+        r"\b(?:const|let|var|val)\s+(?P<name>" + name + r")\s*(?:[=:;]|\b)",
+    ]
+    if ext not in ("py", "pyi", "rb", "go", "rs"):
+        # Typed fields/methods and JS/TS method declarations. A bare foo(); is
+        # a call, while foo() { ... } or Type foo(...); is a declaration.
+        prefix = r"(?:(?:[\w$.]+(?:\s*<[^;{}()=]+>)?(?:\[\])?[?*&]?|<[^;{}()=]+>)[ \t]+)+"
+        signature = r"(?:<[^;{}()]+>)?\s*\([^;{}]*?\)\s*(?:throws\s+[\w.,\s]+)?(?:\s*:\s*[^;{}=]+)?\s*"
+        patterns += [
+            r"^[ \t]*(?P<prefix>" + prefix + r")(?P<name>" + name + r")\s*(?:" + signature + r"[{;]|[=;])",
+            r"^[ \t]*(?P<name>" + name + r")\s*" + signature + r"\{",
+            r"^[ \t]*(?P<name>" + name + r")\s*:\s*(?:async\s+)?(?:function\b|\([^;{}]*\)\s*=>)",
+        ]
+    lines = set()
+    for pattern in patterns:
+        for match in re.finditer(pattern, clean, re.MULTILINE):
+            prefix = match.groupdict().get("prefix") or ""
+            if set(re.findall(r"\w+", prefix)) & {"return", "throw", "new", "await", "yield", "case", "else", "import", "package", "default", "instanceof"}:
+                continue
+            lines.add(clean.count("\n", 0, match.start("name")) + 1)
+    return sorted(lines)
+
+
+def find_definitions(ctx, origin, side, symbol, current=None):
+    if not re.fullmatch(r"(?:[^\W\d]|\$)[\w$]*", symbol, re.UNICODE) or len(symbol) > 200:
+        raise ValueError("invalid symbol")
+    revision = source_revision(ctx, origin, side)
+    args = ["grep", "-l", "-z", "-I", "-F", "-w"]
+    if revision is None and ctx["untracked"]:
+        args += ["--untracked", "--exclude-standard"]
+    args += ["-e", symbol]
+    if revision:
+        args.append(revision)
+    args += ["--"] + ["*." + ext for ext in SOURCE_EXTENSIONS]
+    paths = split_z(git(ctx["root"], *args, ok=(0, 1)))
+    if revision:
+        paths = [p.removeprefix(revision + ":") for p in paths]
+    entry = next(e for e in ctx["files"] if e["path"] == origin)
+    current = current or (entry.get("old") if side == "L" else None) or origin
+    paths.sort(key=lambda p: (p != current, os.path.dirname(p) != os.path.dirname(current), p))
+    matches, skipped = [], 0
+    for path in paths[:200]:
+        try:
+            text = source_text(ctx["root"], path, revision, ctx["untracked"])
+        except ValueError:
+            skipped += 1
+            continue
+        lines = text.splitlines()
+        for line in definition_lines(text, path, symbol):
+            matches.append({"path": path, "line": line, "text": lines[line - 1].strip()[:240]})
+    return {"symbol": symbol, "revision": revision or "working tree",
+            "matches": matches[:100], "truncated": len(paths) > 200 or len(matches) > 100,
+            "skipped": skipped}
+
+
 # --------------------------------------------------------------------- state
+
+def comment_location(comment):
+    start, end = comment.get("start_line"), comment["line"]
+    return "%s–%s" % (start, end) if start and start != end else end
+
+
+def comment_range(rows, start, end):
+    """Visible, consecutive lines on one diff side, within one hunk."""
+    if not re.fullmatch(r"[LR][1-9]\d*", start or "") or not re.fullmatch(r"[LR][1-9]\d*", end or ""):
+        return []
+    lo, hi = int(start[1:]), int(end[1:])
+    if start[0] != end[0] or lo > hi:
+        return []
+    field = "old" if start[0] == "L" else "new"
+    selected = []
+    for row in rows:
+        if row["t"] == "hunk" and selected:
+            break
+        if row.get("k") and lo <= (row.get(field) or 0) <= hi:
+            selected.append(row)
+    if len(selected) != hi - lo + 1 or any(r[field] != lo + i for i, r in enumerate(selected)):
+        return []
+    return selected
+
 
 class Store:
     """.review/state.json, reloaded on disk change so the CLI and the running
@@ -439,7 +623,7 @@ class Store:
                     if not text.strip():
                         continue
                     old = prev.get(c.get("id")) or {}
-                    out.append({
+                    item = {
                         "id": c.get("id") or old.get("id") or new_id(),
                         "line": str(c.get("line", old.get("line", ""))),
                         "text": text,
@@ -450,7 +634,17 @@ class Store:
                         "replies": old.get("replies", []),
                         "awaiting": bool(c.get("awaiting", old.get("awaiting", False))),
                         "resolved": bool(c.get("resolved", old.get("resolved", False))),
-                    })
+                    }
+                    start = c.get("start_line", old.get("start_line"))
+                    if start and start != item["line"]:
+                        end = item["line"]
+                        if (not isinstance(start, str) or not re.fullmatch(r"[LR][1-9]\d*", start)
+                                or not re.fullmatch(r"[LR][1-9]\d*", end)
+                                or start[0] != end[0] or int(start[1:]) > int(end[1:])):
+                            raise ValueError("comment range must be ordered and on the same diff side")
+                        item["start_line"] = start
+                        item["range_snippet"] = str(c.get("range_snippet", old.get("range_snippet", "")))
+                    out.append(item)
                 f["comments"] = out
             self._flush()
             return f
@@ -560,11 +754,17 @@ class Handler(BaseHTTPRequestHandler):
         """Remember each comment's line text, once, so it can be re-found."""
         store = self.ctx["store"]
         by_key = {r["k"]: r for r in rows if r.get("k")}
+        by_key.update({"L%d" % r["old"]: r for r in rows if r.get("old")})
         dirty = False
         for c in store.file(path)["comments"]:
             if not c.get("snippet") and c["line"] in by_key:
                 c["snippet"] = by_key[c["line"]].get("text", "")
                 dirty = bool(c["snippet"]) or dirty
+            if c.get("start_line") and not c.get("range_snippet"):
+                selected = comment_range(rows, c["start_line"], c["line"])
+                if selected and (not c.get("snippet") or c["snippet"] == selected[-1]["text"]):
+                    c["range_snippet"] = "\n".join(r["text"] for r in selected)
+                    dirty = True
         if dirty:
             with store.lock:
                 store._flush()
@@ -601,6 +801,18 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"version": self.ctx["store"].version()})
             if u.path == "/api/state":
                 return self._json(self.ctx["store"].data)
+            if u.path in ("/api/definitions", "/api/source"):
+                origin = (q.get("origin") or [""])[0]
+                side = (q.get("side") or ["R"])[0]
+                if u.path == "/api/definitions":
+                    return self._json(find_definitions(
+                        self.ctx, origin, side, (q.get("symbol") or [""])[0],
+                        (q.get("path") or [None])[0]))
+                revision = source_revision(self.ctx, origin, side)
+                path = (q.get("path") or [""])[0]
+                source = source_text(self.ctx["root"], path, revision, self.ctx["untracked"])
+                return self._json({"path": path, "revision": revision or "working tree",
+                                   "lines": source.splitlines()})
             if u.path == "/api/diff":
                 path = (q.get("path") or [""])[0]
                 entry = next((e for e in self.ctx["files"] if e["path"] == path), None)
@@ -610,6 +822,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._backfill_snippets(path, rows)
                 return self._json({"path": path, "rows": rows})
             return self._err("not found", 404)
+        except ValueError as e:
+            return self._err(e)
         except GitError as e:
             return self._err(e, 500)
 
@@ -660,6 +874,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._err("not found", 404)
         except KeyError as e:
             return self._err(e, 404)
+        except ValueError as e:
+            return self._err(e)
         except GitError as e:
             return self._err(e, 500)
 
@@ -858,6 +1074,12 @@ PAGE = r"""<!doctype html>
   .shortcuts kbd{color:var(--accent);min-width:21px;text-align:center;padding:1px 5px}
   .shortcuts .compose-hint{color:var(--dim);font-size:10px;white-space:nowrap}
   tr.code-row.current-line td.code{box-shadow:inset 3px 0 var(--accent)}
+  tr.code-row.range-selected td.code,tr.code-row.range-hover td.code{background:#30415a}
+  tr.code-row.range-selected td.ln[data-line]{background:#3b5270;color:#fff}
+  td.ln[data-line]{touch-action:none;cursor:pointer}
+  .comment-target{font:600 12px/1.5 var(--mono);color:var(--accent);margin-bottom:8px}
+  .range-label{font:11px/1.5 var(--mono);color:var(--accent);padding:1px 6px}
+  .range-label:disabled{cursor:default;opacity:.8}
   main{border:1px solid var(--line);border-radius:14px;background:var(--bg);scrollbar-color:#515b67 transparent}
   .ovw{max-width:1480px;margin:auto;padding:32px}
   .hero{position:relative;display:flex;justify-content:space-between;align-items:center;gap:24px;padding:4px 0 30px}
@@ -902,6 +1124,21 @@ PAGE = r"""<!doctype html>
   @media(max-width:900px){header{flex-wrap:wrap}.review-context{flex-basis:45%}.top-progress{flex:1}#wrap{gap:10px;padding:10px}aside{width:210px}.hero-art{display:none}.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}.tile:nth-child(2n){border-right:0}.tile:nth-child(n+5){border-bottom:1px solid var(--line)}.tile:nth-child(n+7){border-bottom:0}.legend{font-size:9px;gap:6px}.brow{grid-template-columns:minmax(80px,1fr) 65px 85px;gap:8px}}
   @media(max-width:600px){header{padding:12px;gap:10px}.brand-name{font-size:17px}.review-context{padding-left:10px}.top-progress{display:none}.opt{margin-right:auto}#next,#refresh{font-size:11px;padding:6px 9px}#wrap{flex-direction:column}aside{width:100%;max-height:230px;flex-shrink:0}aside>.head{padding:10px 14px}.file-search{margin-bottom:6px}#list{min-height:65px}.f{padding:7px 9px}.f.ov{margin-bottom:5px}main{flex:1;min-height:0}.ovw{padding:20px}.hero{padding-bottom:24px}.hero h1{font-size:30px}.hero-actions span{display:none}.fhead,.notes{padding:14px}.legend{display:none}col.c-ln{width:35px}tr.cmt td{padding-left:10px}}
   @media(prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important}}
+  .definition-modifier .symbol:hover{cursor:pointer;text-decoration:underline;text-decoration-thickness:2px;text-underline-offset:3px;color:var(--accent)}
+  .definition-hint{color:var(--dim);font-size:11px;margin-left:auto}
+  #definitions{width:min(1100px,94vw);max-width:94vw;height:82vh;max-height:90vh;padding:0;border:1px solid var(--line);border-radius:12px;background:var(--bg);color:var(--fg);box-shadow:0 24px 90px #0009}
+  #definitions[open]{display:flex;flex-direction:column}
+  #definitions::backdrop{background:#0009}
+  .definition-head{display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid var(--line);flex-shrink:0}
+  #definition-title{font:600 13px/1.5 var(--mono);margin:0;flex:1;overflow-wrap:anywhere}
+  #definition-body{overflow:auto;flex:1;min-height:0}
+  .definition-status{padding:12px 18px;color:var(--dim);font-size:12px;overflow-wrap:anywhere}
+  .definition-match{display:block;text-align:left;width:100%;border:0;border-bottom:1px solid var(--line);border-radius:0;padding:14px 18px;background:transparent}
+  .definition-match:hover,.definition-match:focus-visible{background:var(--bg3)}
+  .definition-match strong,.definition-match code{display:block;overflow-wrap:anywhere}
+  .definition-match code{color:var(--dim);margin-top:6px;font:12px/1.5 var(--mono)}
+  .source-row.target-line td{background:#30415a;box-shadow:inset 0 1px #708dab,inset 0 -1px #708dab}
+  .definition-pages{display:flex;gap:10px;padding:10px 18px}
 </style>
 </head>
 <body>
@@ -937,6 +1174,14 @@ PAGE = r"""<!doctype html>
   <span class="compose-hint"><kbd>⌘ / Ctrl ↵</kbd> save · <kbd>Esc</kbd> cancel</span>
 </nav>
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
+<dialog id="definitions" aria-labelledby="definition-title">
+  <div class="definition-head">
+    <button id="definition-back" title="Go back within definitions">← Back to diff</button>
+    <h2 id="definition-title">Go to definition</h2>
+    <button id="definition-close" aria-label="Close definitions">Close · Esc</button>
+  </div>
+  <div id="definition-body" tabindex="0" aria-live="polite"></div>
+</dialog>
 <script>
 const LANG = {js:'javascript',jsx:'javascript',mjs:'javascript',cjs:'javascript',ts:'typescript',tsx:'typescript',
   py:'python',rb:'ruby',go:'go',rs:'rust',java:'java',kt:'kotlin',scala:'scala',swift:'swift',
@@ -945,9 +1190,10 @@ const LANG = {js:'javascript',jsx:'javascript',mjs:'javascript',cjs:'javascript'
   css:'css',scss:'scss',less:'less',md:'markdown',markdown:'markdown',dockerfile:'dockerfile',
   gradle:'groovy',groovy:'groovy',tf:'hcl',hcl:'hcl',ex:'elixir',exs:'elixir',erl:'erlang',clj:'clojure',dart:'dart',r:'r'};
 
-let FILES = [], META = {}, cur = null, open = {};   // open: rowKey -> true (editor visible)
+let FILES = [], META = {}, cur = null, open = {};   // open: rowKey -> comment draft
 let expanded = {};                                  // resolved threads opened by hand
 let ROWS = [];                                      // current file's diff rows
+let lineSelection = null, lineDrag = null;
 
 const esc = s => s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const $ = s => document.querySelector(s);
@@ -1062,6 +1308,158 @@ function hl(text, lang){
   try { return hljs.highlight(text, {language: lang, ignoreIllegals: true}).value; }
   catch (e) { return esc(text); }
 }
+
+/* ----------------------------------------------- local go-to-definition */
+function linkSymbols(element){
+  // Decorate text nodes after highlighting so spans never corrupt its markup.
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) nodes.push(walker.currentNode);
+  for (const node of nodes){
+    if (node.parentElement.closest('.hljs-comment,.hljs-string,.hljs-regexp,.sig')) continue;
+    const fragment = document.createDocumentFragment();
+    let end = 0;
+    for (const match of node.textContent.matchAll(/[\p{L}_$][\p{L}\p{N}_$]*/gu)){
+      fragment.append(node.textContent.slice(end, match.index));
+      const span = document.createElement('span');
+      span.className = 'symbol'; span.textContent = match[0];
+      span.title = 'Ctrl-click or ⌘-click to find definitions';
+      fragment.append(span); end = match.index + match[0].length;
+    }
+    fragment.append(node.textContent.slice(end));
+    node.replaceWith(fragment);
+  }
+}
+function definitionClick(event, context){
+  const symbol = event.target.closest('.symbol');
+  if (!(event.ctrlKey || event.metaKey) || !symbol) return false;
+  event.preventDefault(); event.stopPropagation();
+  lookupDefinition(symbol.textContent, context);
+  return true;
+}
+for (const event of ['keydown', 'keyup', 'pointermove']){
+  document.addEventListener(event, e => document.body.classList.toggle('definition-modifier', e.ctrlKey || e.metaKey));
+}
+window.addEventListener('blur', () => document.body.classList.remove('definition-modifier'));
+// macOS sends a contextmenu event for Control-click instead of a normal click.
+document.addEventListener('contextmenu', e => {
+  const symbol = e.target.closest('.symbol');
+  if (e.ctrlKey && symbol){ e.preventDefault(); }
+});
+
+let definitionView = null, definitionHistory = [], definitionRequest = 0;
+const definitionDialog = $('#definitions');
+function definitionQuery(context){
+  return new URLSearchParams({origin:context.origin, side:context.side, path:context.path});
+}
+function showDefinitionView(view, push = true){
+  if (!definitionDialog.open){
+    definitionHistory = []; definitionView = null;
+    definitionDialog.showModal();
+  }
+  if (push && definitionView){
+    definitionView.scrollTop = $('#definition-body').scrollTop;
+    definitionHistory.push(definitionView);
+  }
+  definitionView = view;
+  $('#definition-back').textContent = definitionHistory.length ? '← Back' : '← Back to diff';
+  $('#definition-title').textContent = view.title;
+  const body = $('#definition-body');
+  body.replaceChildren();
+  const status = document.createElement('div');
+  status.className = 'definition-status'; status.textContent = view.message || '';
+  body.append(status);
+  if (view.kind === 'matches'){
+    for (const match of view.matches){
+      const button = document.createElement('button');
+      button.className = 'definition-match';
+      const label = document.createElement('strong'), code = document.createElement('code');
+      label.textContent = match.path + ':' + match.line; code.textContent = match.text;
+      button.append(label, code);
+      button.onclick = () => openDefinition(match, view.context);
+      body.append(button);
+    }
+  } else if (view.kind === 'source'){
+    const start = view.start ?? Math.max(0, view.line - 41);
+    const end = Math.min(view.lines.length, start + 160);
+    view.start = start;
+    status.textContent = view.revision + ' · Lines ' + (start + 1) + '–' + end + ' of ' + view.lines.length +
+      ' · Ctrl-click / ⌘-click a symbol to follow another definition';
+    const pages = document.createElement('div'); pages.className = 'definition-pages';
+    for (const [label, next, disabled] of [['↑ Earlier lines', Math.max(0, start - 160), start === 0],
+                                         ['↓ Later lines', end, end === view.lines.length]]){
+      const button = document.createElement('button');
+      button.textContent = label; button.disabled = disabled;
+      button.onclick = () => showDefinitionView({...view, start:next, scrollTop:0}, false);
+      pages.append(button);
+    }
+    body.append(pages);
+    const table = document.createElement('table'); table.className = 'diff';
+    table.innerHTML = '<colgroup><col class="c-ln"><col></colgroup>';
+    const tbody = document.createElement('tbody'), lang = langFor(view.path);
+    for (let i = start; i < end; i++){
+      const tr = document.createElement('tr');
+      tr.className = 'source-row' + (i + 1 === view.line ? ' target-line' : '');
+      tr.innerHTML = '<td class="ln">' + (i + 1) + '</td><td class="code">' + hl(view.lines[i], lang) + '</td>';
+      const code = tr.querySelector('.code'); linkSymbols(code);
+      code.onmousedown = e => {
+        if (e.ctrlKey && e.button === 0) definitionClick(e, {...view.context, path:view.path});
+      };
+      code.onclick = e => { if (!e.ctrlKey) definitionClick(e, {...view.context, path:view.path}); };
+      tbody.append(tr);
+    }
+    table.append(tbody); body.append(table);
+  }
+  if (view.scrollTop != null) body.scrollTop = view.scrollTop;
+  else if (view.kind === 'source') body.querySelector('.target-line')?.scrollIntoView({block:'center'});
+  else body.scrollTop = 0;
+}
+async function lookupDefinition(symbol, context){
+  const request = ++definitionRequest;
+  showDefinitionView({kind:'message', title:'Definition of ' + symbol, message:'Finding definitions…'});
+  try {
+    const query = definitionQuery(context); query.set('symbol', symbol);
+    const result = await api('/api/definitions?' + query);
+    if (request !== definitionRequest || !definitionDialog.open) return;
+    if (result.matches.length === 1 && !result.truncated && !result.skipped){
+      await openDefinition(result.matches[0], context, false);
+      return;
+    }
+    const count = result.matches.length;
+    showDefinitionView({kind:'matches', title:'Definition of ' + symbol, context, matches:result.matches,
+      message:(count ? count + ' possible definitions · Choose a location' :
+        'No local definition found. This may be an external dependency or an unsupported declaration.') +
+        ' · ' + result.revision + (result.truncated ? ' · Search limit reached; results are partial.' : '') +
+        (result.skipped ? ' · ' + result.skipped + ' unavailable or oversized files skipped.' : '')}, false);
+  } catch(e){
+    if (request === definitionRequest && definitionDialog.open)
+      showDefinitionView({kind:'message', title:'Definition of ' + symbol, message:'Could not find definitions: ' + e.message}, false);
+  }
+}
+async function openDefinition(match, context, push = true){
+  const request = ++definitionRequest;
+  const title = match.path + ':' + match.line;
+  showDefinitionView({kind:'message', title, message:'Loading source…'}, push);
+  try {
+    const query = definitionQuery(context); query.set('path', match.path);
+    const result = await api('/api/source?' + query);
+    if (request !== definitionRequest || !definitionDialog.open) return;
+    showDefinitionView({kind:'source', title, context, path:match.path, line:match.line,
+      lines:result.lines, revision:result.revision}, false);
+  } catch(e){
+    if (request === definitionRequest && definitionDialog.open)
+      showDefinitionView({kind:'message', title, message:'Could not open source: ' + e.message}, false);
+  }
+}
+$('#definition-back').onclick = () => {
+  ++definitionRequest;
+  if (definitionHistory.length) showDefinitionView(definitionHistory.pop(), false);
+  else definitionDialog.close();
+};
+$('#definition-close').onclick = () => definitionDialog.close();
+definitionDialog.addEventListener('close', () => {
+  ++definitionRequest; definitionView = null; definitionHistory = [];
+});
 
 async function api(url, body){
   const r = await fetch(url, body ? {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body)} : undefined);
@@ -1201,8 +1599,84 @@ function renderList(){
 }
 
 /* -------------------------------------------------------------- main panel */
+const sideKey = (row, side) => row[side === 'L' ? 'old' : 'new'] != null
+  ? side + row[side === 'L' ? 'old' : 'new'] : null;
+const rangeLabel = range => range.start_line && range.start_line !== range.line
+  ? range.start_line + '–' + range.line : range.line;
+
+function commentRange(first, last){
+  if (!first || !last || first[0] !== last[0]) return null;
+  const side = first[0], lo = Math.min(+first.slice(1), +last.slice(1)), hi = Math.max(+first.slice(1), +last.slice(1));
+  const rows = [];
+  for (const row of ROWS){
+    if (row.t === 'hunk' && rows.length) break;
+    const key = sideKey(row, side), number = key && +key.slice(1);
+    if (key && number >= lo && number <= hi) rows.push(row);
+  }
+  if (rows.length !== hi - lo + 1 || rows.some((row, i) => +sideKey(row, side).slice(1) !== lo + i)) return null;
+  return {anchor:first, start_line:side + lo, line:side + hi, rows};
+}
+
+function selectRange(first, last, quiet = false){
+  const range = commentRange(first, last);
+  if (!range){
+    if (!quiet) toast('Select lines on the same side, within one diff hunk.');
+    return false;
+  }
+  lineSelection = range;
+  const keys = new Set(range.rows.map(r => r.k));
+  document.querySelectorAll('#main tr.code-row').forEach(tr => {
+    tr.classList.toggle('range-selected', keys.has(tr.dataset.k));
+    tr.classList.toggle('current-line', tr.dataset.k === range.rows.at(-1).k);
+  });
+  return true;
+}
+
+function canSelectRange(){
+  const editor = document.querySelector('.cmt-ed:not([data-draft]) textarea');
+  if (!editor) return true;
+  editor.focus(); toast('Save or cancel this edit before starting another comment.');
+  return false;
+}
+
+function openRangeEditor(){
+  if (!lineSelection || !canSelectRange()) return;
+  const previous = Object.values(open).find(Boolean);
+  const k = lineSelection.rows.at(-1).k;
+  open = {[k]: {...lineSelection, text:previous?.text || ''}};
+  paintComments(fileOf(cur));
+  document.querySelector('tr.cmt[data-k="' + CSS.escape(k) + '"] textarea')?.focus();
+}
+
+function startLineDrag(event, key){
+  if (event.button !== 0 || event.ctrlKey || event.metaKey || !canSelectRange()) return;
+  event.preventDefault();
+  const first = event.shiftKey && lineSelection ? lineSelection.anchor : key;
+  if (!selectRange(first, key)) return;
+  lineDrag = {first, pointerId:event.pointerId};
+  event.currentTarget.setPointerCapture(event.pointerId);
+}
+document.addEventListener('pointermove', event => {
+  if (!lineDrag || event.pointerId !== lineDrag.pointerId) return;
+  const panel = $('#main').getBoundingClientRect();
+  if (event.clientY > panel.bottom - 24) $('#main').scrollBy({top:32, behavior:'instant'});
+  else if (event.clientY < Math.max(panel.top, $('.fhead').getBoundingClientRect().bottom) + 24)
+    $('#main').scrollBy({top:-32, behavior:'instant'});
+  const tr = document.elementFromPoint(event.clientX, event.clientY)?.closest('#main tr.code-row');
+  if (!tr) return;
+  const row = ROWS[Number(tr.dataset.i)], key = sideKey(row, lineDrag.first[0]);
+  if (key) selectRange(lineDrag.first, key, true);
+});
+document.addEventListener('pointerup', event => {
+  if (!lineDrag || event.pointerId !== lineDrag.pointerId) return;
+  lineDrag = null;
+  openRangeEditor();
+});
+document.addEventListener('pointercancel', () => { lineDrag = null; });
+window.addEventListener('blur', () => { lineDrag = null; });
+
 async function select(path){
-  cur = path; open = {}; expanded = {};
+  cur = path; open = {}; expanded = {}; lineSelection = null; lineDrag = null;
   if (location.hash !== '#f=' + path) history.replaceState(null, '', '#f=' + path);
   renderList();
   const f = fileOf(path);
@@ -1227,7 +1701,9 @@ function drawFile(f, rows){
     '<span class="st ' + esc(f.status[0]) + '">' + esc(f.status) + '</span>' +
     (f.adds === null ? '<span>binary</span>' : '<span class="plus">+' + f.adds + '</span><span class="minus">−' + f.dels + '</span>') +
     '<span>' + f.state.comments.filter(x => !x.resolved).length + ' open of ' +
-    f.state.comments.length + ' thread(s)</span></div>';
+    f.state.comments.length + ' thread(s)</span>' +
+    '<span class="definition-hint">Drag line numbers or Shift-click to comment on a range</span>' +
+    '<span class="definition-hint">Ctrl-click / ⌘-click a symbol → definition</span></div>';
   m.appendChild(head);
 
   const notes = document.createElement('div');
@@ -1262,12 +1738,27 @@ function drawFile(f, rows){
       '<td class="ln">' + (r.old != null ? r.old : '') + '</td>' +
       '<td class="ln">' + (r.new != null ? r.new : '') + '</td>' +
       '<td class="code"><span class="sig">' + sign + '</span> ' + hl(r.text, lang) + '</td>';
-    tr.querySelectorAll('.ln').forEach(td => td.onclick = () => toggle(r.k));
-    tr.querySelector('.code').onclick = () => {
-      document.querySelectorAll('.current-line').forEach(row => row.classList.remove('current-line'));
-      tr.classList.add('current-line');
+    tr.querySelectorAll('.ln').forEach((td, column) => {
+      const key = sideKey(r, column === 0 ? 'L' : 'R');
+      if (!key) return;
+      td.dataset.line = key;
+      td.title = 'Comment on ' + key + ' · Drag or Shift-click to select multiple lines';
+      td.onpointerdown = e => startLineDrag(e, key);
+    });
+    const code = tr.querySelector('.code');
+    const context = {origin:f.path, path:r.t === 'del' ? (f.old || f.path) : f.path,
+                     side:r.t === 'del' ? 'L' : 'R'};
+    linkSymbols(code);
+    code.onmousedown = e => {
+      if (e.ctrlKey && e.button === 0) definitionClick(e, context);
     };
-    tr.querySelector('.code').ondblclick = () => toggle(r.k);
+    code.onclick = e => {
+      if (e.ctrlKey || definitionClick(e, context)) return;
+      if (!canSelectRange()) return;
+      if (selectRange(e.shiftKey && lineSelection ? lineSelection.anchor : r.k, r.k) && Object.values(open).some(Boolean))
+        openRangeEditor();
+    };
+    code.ondblclick = e => { if (!e.ctrlKey && !e.metaKey) toggle(r.k); };
     tb.appendChild(tr);
   });
   tbl.appendChild(tb);
@@ -1319,24 +1810,19 @@ function addComment(){
   const rows = [...document.querySelectorAll('tr.code-row')];
   const row = selected && visible(selected) ? selected : rows.find(visible) || rows[0];
   if (!row){ $('#nt').focus(); toast('No code lines in this file. Add your thoughts in File notes.'); return; }
-  document.querySelectorAll('.current-line').forEach(r => r.classList.remove('current-line'));
-  row.classList.add('current-line');
-  toggle(row.dataset.k);
+  if (row !== selected || !lineSelection) selectRange(row.dataset.k, row.dataset.k);
+  openRangeEditor();
 }
 
 /* --------------------------------------------------------------- comments */
 function toggle(k){
-  open[k] = !open[k];
-  paintComments(fileOf(cur));
-  if (open[k]){
-    const ta = document.querySelector('tr.cmt[data-k="' + CSS.escape(k) + '"] textarea');
-    if (ta) ta.focus();
-  }
+  if (!canSelectRange()) return;
+  if (selectRange(k, k)) openRangeEditor();
 }
 
 /* is the user mid-edit? then live polling must not repaint over them */
 function busy(){
-  return !!document.querySelector('.cmt-ed') ||
+  return !!lineDrag || definitionDialog.open || !!document.querySelector('.cmt-ed') ||
          (document.activeElement && document.activeElement.tagName === 'TEXTAREA');
 }
 
@@ -1364,16 +1850,39 @@ function msg(author, text, ts, tools, isReply){
    comment onto unrelated code. Content wins; if the text is gone, so is the
    anchor, and the thread goes to the orphan block instead of somewhere wrong. */
 function anchor(c, byKey){
+  if (c.start_line && c.start_line !== c.line){
+    const length = +c.line.slice(1) - +c.start_line.slice(1) + 1;
+    const matches = range => range && (!c.range_snippet ||
+      range.rows.map(r => r.text).join('\n') === c.range_snippet);
+    let range = commentRange(c.start_line, c.line);
+    if (!matches(range)){
+      range = null;
+      if (c.range_snippet){
+        let distance = Infinity;
+        for (const row of ROWS){
+          const first = sideKey(row, c.line[0]);
+          if (!first || row.text !== c.range_snippet.split('\n')[0]) continue;
+          const candidate = commentRange(first, first[0] + (+first.slice(1) + length - 1));
+          const d = Math.abs(+first.slice(1) - +c.start_line.slice(1));
+          if (matches(candidate) && d < distance){ range = candidate; distance = d; }
+        }
+      }
+    }
+    if (!range) return null;
+    return {key:range.rows.at(-1).k, start:range.start_line, end:range.line,
+            keys:range.rows.map(r => r.k), from:range.line !== c.line ? rangeLabel(c) : null};
+  }
   const snip = c.snippet || '';
   const row = byKey[c.line];
-  if (row && (!snip || row.text === snip)) return {key: c.line};
+  if (row && (!snip || row.text === snip)) return {key: row.k};
   if (snip.trim().length >= 3){                 // shorter is too generic to chase
     const want = Number(c.line.slice(1)) || 0;
     let best = null;
     for (const r of ROWS){
       if (!r.k || r.text !== snip) continue;
-      if (r.k[0] !== c.line[0] && !(c.line[0] === 'R' && r.t === 'ctx')) continue;
-      const d = Math.abs((Number(r.k.slice(1)) || 0) - want);
+      const key = sideKey(r, c.line[0]);
+      if (!key) continue;
+      const d = Math.abs((Number(key.slice(1)) || 0) - want);
       if (!best || d < best.d) best = {key: r.k, d: d};
     }
     if (best) return {key: best.key, from: c.line};
@@ -1383,14 +1892,18 @@ function anchor(c, byKey){
 
 function paintComments(f){
   document.querySelectorAll('tr.cmt').forEach(tr => tr.remove());
+  document.querySelectorAll('.range-hover').forEach(row => row.classList.remove('range-hover'));
   const byKey = {};
-  for (const r of ROWS) if (r.k) byKey[r.k] = r;
+  for (const r of ROWS) if (r.k){
+    byKey[r.k] = r;
+    if (r.old != null) byKey['L' + r.old] = r;
+  }
 
   const byLine = {}, orphans = [];
   f.state.comments.forEach((c, idx) => {
     const a = anchor(c, byKey);
     if (!a){ orphans.push({c, idx}); return; }
-    (byLine[a.key] = byLine[a.key] || []).push({c, idx, from: a.from});
+    (byLine[a.key] = byLine[a.key] || []).push({c, idx, location:a});
   });
 
   const ob = $('#orph');
@@ -1405,10 +1918,11 @@ function paintComments(f){
       ob.appendChild(h);
       for (const {c, idx} of orphans){
         const t = thread(f, c.line, c, idx, ob);
-        const why = byKey[c.line] ? 'line ' + c.line + ' now holds different code'
+        const why = c.start_line ? 'the selected range changed or is no longer fully visible in this diff'
+                  : byKey[c.line] ? 'line ' + c.line + ' now holds different code'
                                   : 'line ' + c.line + ' is not in this diff';
         t.querySelector('.who b').insertAdjacentHTML('afterend',
-          '<span class="moved" title="' + esc(why) + '">was ' + esc(c.line) + '</span>');
+          '<span class="moved" title="' + esc(why) + '">was ' + esc(rangeLabel(c)) + '</span>');
         ob.appendChild(t);
       }
     }
@@ -1428,10 +1942,10 @@ function paintComments(f){
     td.colSpan = 3;
     row.appendChild(td);
 
-    for (const {c, idx, from} of items){
-      const t = thread(f, k, c, idx, td);
-      if (from) t.querySelector('.who b').insertAdjacentHTML('afterend',
-        '<span class="moved" title="the line moved; matched on its text">moved from ' + esc(from) + '</span>');
+    for (const {c, idx, location} of items){
+      const t = thread(f, k, c, idx, td, location);
+      if (location.from) t.querySelector('.who b').insertAdjacentHTML('afterend',
+        '<span class="moved" title="the code moved; matched on its text">moved from ' + esc(location.from) + '</span>');
       td.appendChild(t);
     }
     if (open[k]) editor(f, k, td, null, '', -1);
@@ -1439,7 +1953,7 @@ function paintComments(f){
   });
 }
 
-function thread(f, k, c, idx, td){
+function thread(f, k, c, idx, td, location){
   const wrap = document.createElement('div');
   const shut = c.resolved && !expanded[c.id];
   wrap.className = 'thr' + (c.resolved ? ' done' : '');
@@ -1458,6 +1972,25 @@ function thread(f, k, c, idx, td){
     ? [['reopen', () => setResolved(false)]]
     : [['edit', () => editor(f, k, td, head, c.text, idx)], ['delete', del]];
   const head = msg(c.author || 'you', c.text, c.ts, tools, false);
+  if (c.start_line){
+    const label = document.createElement('button');
+    label.className = 'range-label';
+    label.textContent = location ? rangeLabel({start_line:location.start, line:location.end}) : rangeLabel(c);
+    label.disabled = !location;
+    label.title = 'Highlight the commented lines';
+    label.onclick = () => {
+      if (!canSelectRange()) return;
+      selectRange(location.start, location.end);
+      document.querySelector('tr.code-row[data-k="' + CSS.escape(location.keys[0]) + '"]')?.scrollIntoView({block:'center'});
+    };
+    head.querySelector('.who b').after(label);
+    if (location){
+      const keys = new Set(location.keys);
+      wrap.onmouseenter = () => document.querySelectorAll('#main tr.code-row').forEach(row =>
+        row.classList.toggle('range-hover', keys.has(row.dataset.k)));
+      wrap.onmouseleave = () => document.querySelectorAll('.range-hover').forEach(row => row.classList.remove('range-hover'));
+    }
+  }
   if (c.resolved){
     head.querySelector('.who b').insertAdjacentHTML('afterend',
       '<span class="ok">\u2713 resolved</span>');
@@ -1551,19 +2084,33 @@ function box(placeholder, text, onSave, onCancel, why){
 /* new / edited top-level comment */
 function editor(f, k, td, replace, text, idx){
   const done = () => { open[k] = false; paintComments(f); };
-  const b = box('Comment on ' + k + '\u2026', text, v => {
+  const range = idx >= 0 ? f.state.comments[idx] : open[k];
+  const label = rangeLabel(range);
+  const b = box('Comment on ' + label + '\u2026', idx < 0 ? range.text : text, v => {
     const val = v.trim();
     const arr = f.state.comments.slice();
     if (idx >= 0){
       if (val) arr[idx] = Object.assign({}, arr[idx], {text: val}); else arr.splice(idx, 1);
     } else if (val){
-      const row = ROWS.find(r => r.k === k);
-      arr.push({line: k, text: val, author: 'you', awaiting: !!META.agent_replies,
-                snippet: row ? row.text : ''});
+      const rows = commentRange(range.start_line || range.line, range.line).rows;
+      const comment = {line:range.line, text:val, author:'you', awaiting:!!META.agent_replies,
+                       snippet:rows.at(-1).text};
+      if (range.start_line !== range.line){
+        comment.start_line = range.start_line;
+        comment.range_snippet = rows.map(r => r.text).join('\n');
+      }
+      arr.push(comment);
     } else return done();
     open[k] = false;
     save(f.path, {comments: arr}).then(() => paintComments(f));
   }, done, META.agent_replies && idx < 0 ? '\u2726 will be flagged for an agent reply' : '');
+  const heading = document.createElement('div');
+  heading.className = 'comment-target'; heading.textContent = 'Comment on ' + label;
+  b.prepend(heading);
+  if (idx < 0){
+    b.dataset.draft = 'true';
+    b.querySelector('textarea').oninput = e => { range.text = e.target.value; };
+  }
   if (replace) replace.replaceWith(b); else td.appendChild(b);
 }
 
@@ -1812,6 +2359,7 @@ function scrollReview(key){
 }
 
 document.addEventListener('keydown', e => {
+  if (definitionDialog.open) return;
   const t = e.target.tagName;
   if (t === 'TEXTAREA' || t === 'INPUT' || t === 'SELECT' || e.target.isContentEditable ||
       e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || e.isComposing) return;
@@ -1879,20 +2427,22 @@ $('#refresh').onclick = async () => {
 
 # ------------------------------------------------- agent-facing subcommands
 
-def thread_context(rows, line, n):
-    """The diff lines around a commented line, with the target marked."""
-    i = next((k for k, r in enumerate(rows) if r.get("k") == line), None)
-    if i is None:
+def thread_context(rows, line, n, start_line=None):
+    """The diff around a comment, with every line in its range marked."""
+    selected = comment_range(rows, start_line or line, line)
+    if not selected:
         return []
+    keys = {r["k"] for r in selected}
+    i, end = rows.index(selected[0]), rows.index(selected[-1])
     hunk = next((rows[k]["text"] for k in range(i, -1, -1)
                  if rows[k]["t"] == "hunk"), None)
     sign = {"add": "+", "del": "-", "ctx": " "}
     out = [hunk] if hunk else []
-    for k in range(max(0, i - n), min(len(rows), i + n + 1)):
+    for k in range(max(0, i - n), min(len(rows), end + n + 1)):
         r = rows[k]
         if r["t"] == "hunk":
             continue
-        out.append("%s%s%s" % (">>> " if k == i else "    ",
+        out.append("%s%s%s" % (">>> " if r.get("k") in keys else "    ",
                                sign.get(r["t"], " "), r.get("text", "")))
     return out
 
@@ -1940,13 +2490,14 @@ def cmd_pending(argv):
                 rows_cache[path] = []
         for c in wanted:
             out.append({"path": path, "id": c["id"], "line": c["line"],
+                        "start_line": c.get("start_line", c["line"]),
                         "side": "new" if c["line"].startswith("R") else "old",
                         "lineno": c["line"][1:], "author": c["author"],
                         "comment": c["text"], "replies": c["replies"],
                         "resolved": c.get("resolved", False),
                         "file_notes": f["notes"], "reviewed": f["reviewed"],
                         "context": thread_context(rows_cache[path], c["line"],
-                                                  a.context)})
+                                                  a.context, c.get("start_line"))})
     json.dump(out, sys.stdout, indent=2)
     sys.stdout.write("\n")
 
@@ -2022,7 +2573,6 @@ def cmd_todo(argv):
                 rows = file_diff(root, e)
             except GitError:
                 rows = []
-        keys = {r["k"] for r in rows if r.get("k")}
 
         out.append("")
         out.append("%s%s" % (path, "   [not in the current diff]" if (e or {}).get("stale") else ""))
@@ -2036,14 +2586,14 @@ def cmd_todo(argv):
                 flagged += 1
             if c.get("resolved"):
                 marks.append("resolved")
-            if c["line"] not in keys:
-                marks.append("line no longer in the diff")
+            if not comment_range(rows, c.get("start_line", c["line"]), c["line"]):
+                marks.append("range no longer in the diff" if c.get("start_line") else "line no longer in the diff")
             out.append("  [%s] %s  by %s%s" % (
-                c["id"], c["line"], c.get("author", "you"),
+                c["id"], comment_location(c), c.get("author", "you"),
                 ("  <" + ", ".join(marks) + ">") if marks else ""))
             out.append(wrap(c["text"], "      "))
             if a.context and rows:
-                for ln in thread_context(rows, c["line"], a.context):
+                for ln in thread_context(rows, c["line"], a.context, c.get("start_line")):
                     out.append("      | " + ln)
             for r in c["replies"]:
                 out.append(wrap("-> %s: %s" % (r["author"], r["text"]), "      "))
